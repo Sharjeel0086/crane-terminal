@@ -6,6 +6,7 @@ mod mac_keys;
 mod dir_cache;
 mod file_watcher;
 mod git;
+mod git_log;
 mod jobs;
 mod lsp;
 mod modals;
