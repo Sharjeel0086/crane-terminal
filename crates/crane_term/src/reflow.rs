@@ -130,12 +130,21 @@ fn collect_logical_lines(rows: &[Row], cursor: &Cursor) -> Vec<LogicalLine> {
         }
         // Cursor mapping: if the cursor's row equals this physical
         // row, the cursor's flat position is current.cells.len() +
-        // cursor.col (clamped to the actual material length).
-        if cursor.row == row_idx {
-            let flat = current.cells.len() + cursor.col;
+        // cursor.col. Clamp to `cells.len()` AFTER the extend — the
+        // shell's cursor often sits past stripped trailing spaces
+        // (prompt "$ " → cursor col 2 but trimmed to 1 cell), and
+        // an out-of-range flat would make rewrap drop the cursor
+        // and reset it to (0,0). With (0,0), SIGWINCH-triggered
+        // prompt redraws (which emit `\e[J`) wipe the visible grid.
+        let cursor_here = cursor.row == row_idx;
+        let pre_len = current.cells.len();
+        current.cells.extend(row_cells);
+        if cursor_here {
+            let flat = pre_len
+                .saturating_add(cursor.col)
+                .min(current.cells.len());
             current.cursor_at = Some(flat);
         }
-        current.cells.extend(row_cells);
 
         if last_wraps {
             // Continue: next row joins this logical line.
@@ -183,16 +192,20 @@ fn rewrap_lines(
 
     for line in lines {
         if line.cells.is_empty() {
-            // Empty line — emit one empty row.
+            // Empty line — emit one empty row. `collect_logical_lines`
+            // clamps `cursor_at` to `cells.len()`, so on an empty
+            // line `cursor_at` is always `Some(0)` when present. We
+            // still match `Some(_)` so the cursor row is recorded
+            // (without it the line would silently swallow the
+            // cursor and rewrap returns None).
             let row = Row::new(new_cols, template);
-            if line.cursor_at == Some(0) {
+            if line.cursor_at.is_some() {
                 cursor_pos = Some((out.len(), 0));
             }
             out.push(row);
             continue;
         }
         let mut idx = 0;
-        let mut first_in_line = true;
         while idx < line.cells.len() {
             // Decide how many logical cells fit in one physical
             // row at new_cols width. Wide-char pairs (WIDE_CHAR +
@@ -253,24 +266,28 @@ fn rewrap_lines(
                 }
             }
 
-            // Cursor mapping: if the cursor's flat position falls
-            // inside this chunk, record its physical (row, col).
-            if first_in_line && cursor_pos.is_none() {
+            // Cursor mapping: claim the cursor for this chunk when
+            // its flat position lies strictly inside `[chunk_start,
+            // idx)`, OR — only on the line's final chunk — when it
+            // sits exactly at `cells.len()` (the shell's normal
+            // prompt state, cursor one past the last glyph). The
+            // exact-end allowance is the previously-missing case
+            // that caused cursor loss → reset to (0,0) → SIGWINCH
+            // prompt redraw `\e[J` wiping the visible grid.
+            // `collect_logical_lines` guarantees `flat <= cells.len()`,
+            // so we use `==` rather than `<=` for tightness.
+            if cursor_pos.is_none() {
                 if let Some(flat) = line.cursor_at {
-                    if flat >= chunk_start && flat <= idx {
+                    let line_continues = idx < line.cells.len();
+                    let in_range = flat >= chunk_start
+                        && (flat < idx || (!line_continues && flat == line.cells.len()));
+                    if in_range {
                         let col_offset = flat - chunk_start;
-                        cursor_pos = Some((out.len(), col_offset.min(new_cols - 1)));
-                    }
-                }
-            } else if cursor_pos.is_none() {
-                if let Some(flat) = line.cursor_at {
-                    if flat >= chunk_start && flat <= idx {
-                        let col_offset = flat - chunk_start;
-                        cursor_pos = Some((out.len(), col_offset.min(new_cols - 1)));
+                        cursor_pos =
+                            Some((out.len(), col_offset.min(new_cols.saturating_sub(1))));
                     }
                 }
             }
-            first_in_line = false;
 
             out.push(row);
         }
@@ -498,6 +515,143 @@ mod tests {
             full.contains("hello world this is a long line"),
             "content lost across resize cycle. got: {:?}",
             full
+        );
+    }
+
+    /// After resize, the cursor must stay at the prompt the user
+    /// was sitting at — not get reset to (0,0). When the shell's
+    /// SIGWINCH handler redraws its prompt, many prompts emit
+    /// `\e[J` (clear from cursor to end of screen). If reflow
+    /// drops the cursor to (0,0), that escape clears the entire
+    /// visible grid and the user sees content "vanish".
+    #[test]
+    fn resize_preserves_prompt_cursor_position() {
+        use crate::term::Term;
+        use crate::Processor;
+        let mut t = Term::new(24, 80);
+        let mut p = Processor::new();
+        for i in 0..18 {
+            let line = format!("line {:02}\r\n", i);
+            p.parse_bytes(&mut t, line.as_bytes());
+        }
+        // Final prompt with cursor sitting one past the last glyph
+        // (the canonical "$ " state — col=2 but only one non-space
+        // cell remains after trim).
+        p.parse_bytes(&mut t, b"$ ");
+        let cur_row_pre = t.grid.cursor.row;
+        let cur_col_pre = t.grid.cursor.col;
+        let prompt_text_at = |t: &Term, r: usize| -> String {
+            t.grid.rows[r]
+                .cells
+                .iter()
+                .take(t.grid.rows[r].occ)
+                .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+                .collect()
+        };
+        let pre = prompt_text_at(&t, cur_row_pre);
+        assert!(pre.contains("$"), "pre-resize: prompt row missing $");
+        assert_eq!(cur_col_pre, 2, "pre-resize: cursor expected at col 2");
+
+        t.resize(24, 60);
+        let post = prompt_text_at(&t, t.grid.cursor.row);
+        assert!(
+            post.contains("$"),
+            "post-resize: cursor row no longer holds the prompt. cursor=({},{}), row text={:?}",
+            t.grid.cursor.row,
+            t.grid.cursor.col,
+            post
+        );
+        // Cursor must NOT have collapsed to (0,0) — that's the
+        // signature of the bug we're fixing.
+        assert!(
+            !(t.grid.cursor.row == 0 && t.grid.cursor.col == 0),
+            "post-resize: cursor reset to (0,0) — would cause `\\e[J` clear from prompt redraw"
+        );
+        // Tighter: cursor column must still be past the visible
+        // prompt glyph. Reflow strips the trailing space from "$ ",
+        // so the prompt cell shrinks to one glyph and the
+        // semantically-correct end-of-line cursor is col 1 (just
+        // past "$"). A regression that lands cursor at col 0 would
+        // still trigger `\e[J` wiping the prompt's own row.
+        assert!(
+            t.grid.cursor.col >= 1,
+            "post-resize: cursor.col={} collapsed to start of prompt row",
+            t.grid.cursor.col
+        );
+    }
+
+    /// Build a term with `ls -la`-style output filling the live grid
+    /// and a fresh `$ ` prompt at the bottom — the shape the user
+    /// sees right before they grab the window edge.
+    #[cfg(test)]
+    fn build_ls_la_term() -> crate::term::Term {
+        use crate::term::Term;
+        use crate::Processor;
+        let mut t = Term::new(24, 80);
+        let mut p = Processor::new();
+        for i in 0..18 {
+            let line = format!(
+                "-rw-r--r--  1 user  staff  {:>6}  Jan 01 00:00  file_{:02}.txt\r\n",
+                i * 100,
+                i
+            );
+            p.parse_bytes(&mut t, line.as_bytes());
+        }
+        p.parse_bytes(&mut t, b"$ ");
+        t
+    }
+
+    #[cfg(test)]
+    fn live_grid_text(t: &crate::term::Term) -> String {
+        t.grid
+            .rows
+            .iter()
+            .flat_map(|r| r.cells.iter().take(r.occ))
+            .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+            .collect()
+    }
+
+    /// Width resize alone must keep recent output and the prompt in
+    /// the live grid — display_offset stays 0, so only the live grid
+    /// is on screen.
+    #[test]
+    fn ls_la_width_resize_keeps_visible_content() {
+        let mut t = build_ls_la_term();
+        assert!(live_grid_text(&t).contains("file_17.txt"));
+        t.resize(24, 60);
+        assert_eq!(
+            t.grid.display_offset, 0,
+            "display_offset must be 0 — that's what the user sees"
+        );
+        let v = live_grid_text(&t);
+        assert!(
+            v.contains("$"),
+            "after width resize: prompt vanished from live grid. visible len={}, sample={:?}",
+            v.len(),
+            &v[..v.len().min(200)]
+        );
+        assert!(
+            v.contains("file_17.txt"),
+            "after width resize: most recent ls output vanished from live grid"
+        );
+    }
+
+    /// Height resize alone must keep recent output and the prompt in
+    /// the live grid — exercised independently from the width path
+    /// so a regression in either can't be masked by the other.
+    #[test]
+    fn ls_la_height_resize_keeps_visible_content() {
+        let mut t = build_ls_la_term();
+        t.resize(30, 80);
+        assert_eq!(t.grid.display_offset, 0);
+        let v = live_grid_text(&t);
+        assert!(
+            v.contains("$"),
+            "after height resize: prompt vanished from live grid"
+        );
+        assert!(
+            v.contains("file_17.txt"),
+            "after height resize: most recent ls output vanished from live grid"
         );
     }
 
