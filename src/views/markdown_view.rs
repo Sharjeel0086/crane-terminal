@@ -1,4 +1,5 @@
 use crate::state::layout::MarkdownPane;
+use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontFamily, FontId, RichText, ScrollArea};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::path::Path;
@@ -52,34 +53,58 @@ pub fn render_md(ui: &mut egui::Ui, src: &str, font_size: f32) {
 
     let mut bold = false;
     let mut italic = false;
-    let code = false;
     let mut heading: Option<HeadingLevel> = None;
-    let mut in_list = false;
     let mut in_code_block = false;
-    let mut line_buf: Vec<RichText> = Vec::new();
     let fg = Color32::from_rgb(210, 214, 224);
     let dim = Color32::from_rgb(140, 146, 160);
     let accent = Color32::from_rgb(120, 170, 230);
+    let code_fg = Color32::from_rgb(210, 180, 120);
+    let code_bg = Color32::from_rgb(28, 32, 44);
 
-    let flush = |ui: &mut egui::Ui, line: &mut Vec<RichText>| {
-        if line.is_empty() {
+    // A single `LayoutJob` per "block" (paragraph, list item,
+    // heading, blockquote) so the whole run lays out as one
+    // continuous wrapped line. Building paragraphs from many tiny
+    // `ui.label()`s inserts `item_spacing` between every fragment;
+    // smart-punctuation splits each curly quote into its own
+    // `Event::Text`, which produced the visible gaps in the bug
+    // report.
+    let mut job: LayoutJob = LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+
+    let push = |job: &mut LayoutJob, text: &str, fmt: TextFormat| {
+        if !text.is_empty() {
+            job.append(text, 0.0, fmt);
+        }
+    };
+
+    let flush = |ui: &mut egui::Ui, job: &mut LayoutJob| {
+        if job.text.is_empty() {
             return;
         }
-        ui.horizontal_wrapped(|ui| {
-            for r in line.drain(..) {
-                ui.label(r);
-            }
-        });
+        let mut full = std::mem::take(job);
+        full.wrap.max_width = ui.available_width();
+        ui.label(full);
+    };
+
+    // egui's TextFormat doesn't have a `bold` flag; the
+    // proportional font we ship doesn't include a bold face, so
+    // emphasis is simulated by brighter text. Italic is honored
+    // natively.
+    let plain_fmt = |bold: bool, italic: bool| TextFormat {
+        font_id: prop.clone(),
+        color: if bold { Color32::WHITE } else { fg },
+        italics: italic,
+        ..Default::default()
     };
 
     for event in parser {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
-                flush(ui, &mut line_buf);
+                flush(ui, &mut job);
                 heading = Some(level);
             }
             Event::End(TagEnd::Heading(_)) => {
-                flush(ui, &mut line_buf);
+                flush(ui, &mut job);
                 heading = None;
                 ui.add_space(6.0);
             }
@@ -88,7 +113,7 @@ pub fn render_md(ui: &mut egui::Ui, src: &str, font_size: f32) {
             Event::Start(Tag::Strong) => bold = true,
             Event::End(TagEnd::Strong) => bold = false,
             Event::Start(Tag::CodeBlock(_)) => {
-                flush(ui, &mut line_buf);
+                flush(ui, &mut job);
                 in_code_block = true;
             }
             Event::End(TagEnd::CodeBlock) => {
@@ -96,37 +121,55 @@ pub fn render_md(ui: &mut egui::Ui, src: &str, font_size: f32) {
                 ui.add_space(4.0);
             }
             Event::Start(Tag::List(_)) => {
-                flush(ui, &mut line_buf);
-                in_list = true;
+                flush(ui, &mut job);
             }
             Event::End(TagEnd::List(_)) => {
-                in_list = false;
                 ui.add_space(4.0);
             }
             Event::Start(Tag::Item) => {
-                line_buf.push(RichText::new("• ").color(accent).font(prop.clone()));
+                push(
+                    &mut job,
+                    "•  ",
+                    TextFormat {
+                        font_id: prop.clone(),
+                        color: accent,
+                        ..Default::default()
+                    },
+                );
             }
             Event::End(TagEnd::Item) => {
-                flush(ui, &mut line_buf);
+                flush(ui, &mut job);
             }
             Event::Start(Tag::Paragraph) => {}
             Event::End(TagEnd::Paragraph) => {
-                flush(ui, &mut line_buf);
+                flush(ui, &mut job);
                 ui.add_space(4.0);
             }
             Event::Start(Tag::BlockQuote(_)) => {
-                line_buf.push(RichText::new("▍ ").color(dim).font(prop.clone()));
+                push(
+                    &mut job,
+                    "▍ ",
+                    TextFormat {
+                        font_id: prop.clone(),
+                        color: dim,
+                        ..Default::default()
+                    },
+                );
             }
             Event::End(TagEnd::BlockQuote) => {
-                flush(ui, &mut line_buf);
+                flush(ui, &mut job);
             }
             Event::Code(text) => {
-                let mut r = RichText::new(text.to_string())
-                    .font(mono.clone())
-                    .background_color(Color32::from_rgb(28, 32, 44))
-                    .color(Color32::from_rgb(210, 180, 120));
-                if bold { r = r.strong(); }
-                line_buf.push(r);
+                push(
+                    &mut job,
+                    &text,
+                    TextFormat {
+                        font_id: mono.clone(),
+                        color: code_fg,
+                        background: code_bg,
+                        ..Default::default()
+                    },
+                );
             }
             Event::Text(text) => {
                 if in_code_block {
@@ -134,40 +177,46 @@ pub fn render_md(ui: &mut egui::Ui, src: &str, font_size: f32) {
                         ui.label(
                             RichText::new(line)
                                 .font(mono.clone())
-                                .color(Color32::from_rgb(210, 180, 120)),
+                                .color(code_fg),
                         );
                     }
                     continue;
                 }
-                let mut r = if let Some(level) = heading {
+                let fmt = if let Some(level) = heading {
                     let scale = match level {
                         HeadingLevel::H1 => 1.8,
                         HeadingLevel::H2 => 1.5,
                         HeadingLevel::H3 => 1.3,
                         _ => 1.15,
                     };
-                    RichText::new(text.to_string())
-                        .font(FontId::new(font_size * scale, FontFamily::Proportional))
-                        .color(accent)
-                        .strong()
+                    TextFormat {
+                        font_id: FontId::new(font_size * scale, FontFamily::Proportional),
+                        color: accent,
+                        italics: italic,
+                        ..Default::default()
+                    }
                 } else {
-                    RichText::new(text.to_string()).font(prop.clone()).color(fg)
+                    plain_fmt(bold, italic)
                 };
-                if bold { r = r.strong(); }
-                if italic { r = r.italics(); }
-                if code { r = r.font(mono.clone()); }
-                line_buf.push(r);
+                push(&mut job, &text, fmt);
             }
             Event::SoftBreak | Event::HardBreak => {
-                line_buf.push(RichText::new(" ").font(prop.clone()));
+                push(
+                    &mut job,
+                    " ",
+                    TextFormat {
+                        font_id: prop.clone(),
+                        color: fg,
+                        ..Default::default()
+                    },
+                );
             }
             Event::Rule => {
-                flush(ui, &mut line_buf);
+                flush(ui, &mut job);
                 ui.separator();
             }
             _ => {}
         }
     }
-    flush(ui, &mut line_buf);
-    let _ = (in_list, code);
+    flush(ui, &mut job);
 }
