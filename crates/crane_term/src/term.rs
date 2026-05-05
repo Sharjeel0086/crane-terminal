@@ -272,9 +272,16 @@ impl Term {
     /// Materialize the active selection as plain text. `None` when
     /// no selection is set or the selection is empty. Wide-char
     /// spacers are skipped — their glyph belongs to the preceding
-    /// `WIDE_CHAR` cell — and trailing whitespace per row is
-    /// trimmed (matches iTerm2/WezTerm copy semantics so the right-
-    /// padding TUIs apply doesn't show up in clipboard text).
+    /// `WIDE_CHAR` cell.
+    ///
+    /// Wrap-aware: when a row's last cell carries `WRAPLINE`, the
+    /// row was forced to break at the margin mid-logical-line. That
+    /// row is concatenated to the next without a `\n` and its
+    /// trailing characters are NOT trimmed (the "trailing space"
+    /// might be the literal next char of the command). Rows that
+    /// don't wrap get trailing whitespace trimmed (TUIs right-pad
+    /// rows to the column width and copy users don't want that),
+    /// matching iTerm2/WezTerm semantics.
     pub fn selection_to_string(&self) -> Option<String> {
         let sel = self.selection.as_ref()?;
         if sel.is_empty() {
@@ -282,47 +289,72 @@ impl Term {
         }
         let range = sel.to_range();
         let cols = self.grid.columns;
-        let mut lines: Vec<String> = Vec::new();
-        for line in range.start.line.0..=range.end.line.0 {
-            let mut row = String::with_capacity(cols);
+        let row_at = |line: i32| -> Option<&Row> {
+            if line >= 0 {
+                self.grid.rows.get(line as usize)
+            } else {
+                let from_back = (-line) as usize;
+                self.scrollback
+                    .len()
+                    .checked_sub(from_back)
+                    .and_then(|i| self.scrollback.iter().nth(i))
+            }
+        };
+        let mut out = String::new();
+        let mut nonempty = false;
+        let line_start = range.start.line.0;
+        let line_end = range.end.line.0;
+        for line in line_start..=line_end {
+            let mut row_text = String::with_capacity(cols);
             for col in 0..cols {
                 if !range.contains(Point::new(Line(line), Column(col))) {
-                    if !row.is_empty() {
-                        // Selection ended on this line — trim and
-                        // emit, breaking the col loop.
+                    if !row_text.is_empty() {
+                        // Selection ended within this row — emit
+                        // what we've gathered and stop scanning
+                        // columns.
                         break;
                     }
                     continue;
                 }
-                let cell_opt = if line >= 0 {
-                    self.grid.cell_at(line as usize, col)
-                } else {
-                    let from_back = (-line) as usize;
-                    self.scrollback
-                        .len()
-                        .checked_sub(from_back)
-                        .and_then(|i| {
-                            self.scrollback
-                                .iter()
-                                .nth(i)
-                                .and_then(|r| r.cells.get(col))
-                        })
-                };
-                if let Some(cell) = cell_opt {
+                if let Some(cell) = row_at(line).and_then(|r| r.cells.get(col)) {
                     if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                        row.push(if cell.ch == '\0' { ' ' } else { cell.ch });
+                        row_text.push(if cell.ch == '\0' { ' ' } else { cell.ch });
                     }
                 }
             }
-            // Trim trailing padding spaces — TUIs right-pad to the
-            // column width and copy users don't want that.
-            let trimmed = row.trim_end_matches([' ', '\t']).to_string();
-            lines.push(trimmed);
+            // A row "wraps into" the next iff its actual last cell
+            // (col cols-1) carries WRAPLINE. The selection range is
+            // independent — the wrap status belongs to the row, not
+            // the selection. Block selections opt out: the user
+            // chose a rectangle and wants N independent lines, not
+            // a merged logical line that drops the column-grid
+            // structure.
+            let wraps_into_next = !range.is_block
+                && line < line_end
+                && row_at(line)
+                    .and_then(|r| r.cells.last())
+                    .map(|c| c.flags.contains(Flags::WRAPLINE))
+                    .unwrap_or(false);
+            if !wraps_into_next {
+                // Margin-padding only — strip it. Wrapped rows keep
+                // their tail intact so a literal space at the wrap
+                // boundary survives.
+                while row_text.ends_with(' ') || row_text.ends_with('\t') {
+                    row_text.pop();
+                }
+            }
+            if !row_text.is_empty() {
+                nonempty = true;
+            }
+            out.push_str(&row_text);
+            if line < line_end && !wraps_into_next {
+                out.push('\n');
+            }
         }
-        if lines.iter().all(|l| l.is_empty()) {
+        if !nonempty {
             return None;
         }
-        Some(lines.join("\n"))
+        Some(out)
     }
 
     /// Plain-text snapshot: every scrollback row, then every
@@ -491,6 +523,31 @@ impl Term {
             | Attr::CancelBlink
             | Attr::UnderlineColor(_) => {}
         }
+    }
+
+    /// Reverse-wraparound step: if the cursor sits at col 0 and the
+    /// row immediately above was filled by auto-wrap (WRAPLINE on
+    /// its last cell), move the cursor to (row-1, cols-1). Returns
+    /// `true` when the step happened. No-op + `false` at row 0 or
+    /// when the row above didn't wrap into ours.
+    fn move_back_one_with_wrap(&mut self) -> bool {
+        if self.grid.cursor.row == 0 {
+            return false;
+        }
+        let prev_row_idx = self.grid.cursor.row - 1;
+        let prev_wraps = self
+            .grid
+            .rows
+            .get(prev_row_idx)
+            .and_then(|r| r.cells.last())
+            .map(|c| c.flags.contains(Flags::WRAPLINE))
+            .unwrap_or(false);
+        if !prev_wraps {
+            return false;
+        }
+        self.grid.cursor.row = prev_row_idx;
+        self.grid.cursor.col = self.grid.columns.saturating_sub(1);
+        true
     }
 
     /// Reset every cell on the current row to the template, range
@@ -685,6 +742,17 @@ impl Handler for Term {
     fn backspace(&mut self) {
         if self.grid.cursor.col > 0 {
             self.grid.cursor.col -= 1;
+        } else {
+            // Reverse-wraparound (terminfo `bw`, which xterm-256color
+            // advertises and crane sets as $TERM): a backspace from
+            // col 0 must cross back to (row-1, cols-1) when the row
+            // above was filled by auto-wrap (WRAPLINE on its last
+            // cell). Bash readline relies on this when redrawing
+            // multi-line wrapped commands during ↑/↓ history rotation;
+            // saturating at col 0 leaves the cursor on the
+            // continuation row and subsequent writes overlay garbage
+            // on top of the prior command.
+            self.move_back_one_with_wrap();
         }
         self.grid.cursor.input_needs_wrap = false;
     }
@@ -710,8 +778,19 @@ impl Handler for Term {
     }
 
     fn move_backward(&mut self, n: usize) {
+        // Same reverse-wraparound rule as `backspace`: step back
+        // across WRAPLINE boundaries. Readline issues `\e[<n>D`
+        // for some history-rotation paths; clamping at col 0 of
+        // the wrap-continuation row puts the cursor in the wrong
+        // place and the redraw paints over garbage.
         let n = n.max(1);
-        self.grid.cursor.col = self.grid.cursor.col.saturating_sub(n);
+        for _ in 0..n {
+            if self.grid.cursor.col > 0 {
+                self.grid.cursor.col -= 1;
+            } else if !self.move_back_one_with_wrap() {
+                break;
+            }
+        }
         self.grid.cursor.input_needs_wrap = false;
     }
 
@@ -1087,7 +1166,244 @@ impl Handler for Term {
 mod tests {
     use super::*;
     use crate::cell::{Color, NamedColor};
+    use crate::index::{Column, Line, Point, Side};
+    use crate::selection::{Selection, SelectionType};
     use vte::ansi::{Attr, ClearMode, LineClearMode};
+
+    /// User-reported regression: pressing ↑ in bash inside an SSH
+    /// session over a wrapped command leaves screen garbage. Bash
+    /// readline emits `\b` to step the cursor back across the wrap
+    /// boundary while redrawing — terminfo `xterm-256color` (which
+    /// crane sets) advertises `bw`, so readline assumes the terminal
+    /// reverse-wraps. Without this, the cursor saturates at col 0 of
+    /// the continuation row, the new prompt+command paints starting
+    /// there, and the head of the previous command stays on screen.
+    #[test]
+    fn backspace_at_col0_wraps_to_prev_row_when_prev_wraps() {
+        let mut t = Term::new(5, 50);
+        let mut p = crate::Processor::new();
+        // Auto-wrap a long line: writes spill from row 0 onto row 1.
+        // The actual wrap sets WRAPLINE on row 0's last cell.
+        let line = b"ssh -i ./.crane/secrets/login.pem -o IdentitiesOnly=yes -J ec2-user@host";
+        p.parse_bytes(&mut t, line);
+        let row0_wraps = t.grid.rows[0]
+            .cells
+            .last()
+            .map(|c| c.flags.contains(Flags::WRAPLINE))
+            .unwrap_or(false);
+        assert!(row0_wraps, "fixture broken: row 0 didn't wrap");
+        // Land cursor at the start of row 1 (the continuation),
+        // exactly where readline would place it before stepping
+        // back into the wrap.
+        p.parse_bytes(&mut t, b"\r");
+        assert_eq!(t.grid.cursor.col, 0);
+        let row_before = t.grid.cursor.row;
+        // Single \b must cross the wrap boundary.
+        p.parse_bytes(&mut t, b"\x08");
+        assert_eq!(
+            t.grid.cursor.row,
+            row_before - 1,
+            "backspace at col 0 with prev-wraps should land on prev row"
+        );
+        assert_eq!(
+            t.grid.cursor.col,
+            t.grid.columns - 1,
+            "backspace at col 0 with prev-wraps should land at last col"
+        );
+    }
+
+    /// Sibling case: backspace at col 0 of a row whose predecessor
+    /// did NOT wrap (real `\r\n` boundary) must stay put.
+    #[test]
+    fn backspace_at_col0_does_not_wrap_across_real_newline() {
+        let mut t = Term::new(5, 80);
+        let mut p = crate::Processor::new();
+        p.parse_bytes(&mut t, b"first\r\nsecond");
+        // Move to col 0 of row 1.
+        p.parse_bytes(&mut t, b"\r");
+        let row_before = t.grid.cursor.row;
+        p.parse_bytes(&mut t, b"\x08");
+        assert_eq!(t.grid.cursor.row, row_before, "must not cross real newline");
+        assert_eq!(t.grid.cursor.col, 0);
+    }
+
+    /// `\e[<n>D` (CSI D, cursor-back) should also reverse-wrap when
+    /// the request goes past col 0 and the row above wrapped.
+    #[test]
+    fn cursor_back_n_walks_across_wrap_boundary() {
+        let mut t = Term::new(5, 50);
+        let mut p = crate::Processor::new();
+        let line = b"ssh -i ./.crane/secrets/login.pem -o IdentitiesOnly=yes -J ec2-user@host";
+        p.parse_bytes(&mut t, line);
+        // Cursor sits at the end of the wrapped command (row 1, mid-col).
+        // Walk back past col 0.
+        let target_col = t.grid.cursor.col;
+        let row_before = t.grid.cursor.row;
+        // Step back enough to cross the boundary by 5 cols.
+        let n = target_col + 5;
+        let seq = format!("\x1b[{}D", n);
+        p.parse_bytes(&mut t, seq.as_bytes());
+        assert_eq!(t.grid.cursor.row, row_before - 1);
+        assert_eq!(t.grid.cursor.col, t.grid.columns - 5);
+    }
+
+    /// User-reported clipboard regression: a long shell command that
+    /// the terminal wrapped at the right margin must come out of the
+    /// clipboard as one continuous logical line, not joined with a
+    /// stray `\n` at the wrap point.
+    #[test]
+    fn selection_concatenates_wrapped_rows_without_newline() {
+        // Narrow terminal so we know exactly where the wrap lands.
+        let mut t = Term::new(5, 50);
+        let mut p = crate::Processor::new();
+        let line = b"ssh -i ./.crane/secrets/login.pem -o IdentitiesOnly=yes -J ec2-user@host";
+        p.parse_bytes(&mut t, line);
+        // Sanity: row 0 must wrap (last cell carries WRAPLINE).
+        let row0_wraps = t.grid.rows[0]
+            .cells
+            .last()
+            .map(|c| c.flags.contains(Flags::WRAPLINE))
+            .unwrap_or(false);
+        assert!(row0_wraps, "test fixture broken: row 0 didn't wrap");
+        // Select from start of row 0 through the last char on row 1.
+        let mut sel = Selection::new(SelectionType::Simple, Point::new(Line(0), Column(0)), Side::Left);
+        sel.update(Point::new(Line(1), Column(49)), Side::Right);
+        t.selection = Some(sel);
+        let copied = t.selection_to_string().expect("selection should produce text");
+        // No \n inside the selection — it was one wrapped logical line.
+        assert!(
+            !copied.contains('\n'),
+            "wrapped selection contains stray newline: {:?}",
+            copied
+        );
+        // The wrap point itself must not have lost a character. The
+        // simplest invariant: the copied text starts with the original
+        // command prefix.
+        assert!(
+            copied.starts_with("ssh -i ./.crane/secrets/login.pem"),
+            "wrapped copy garbled the prefix: {:?}",
+            copied
+        );
+        assert!(
+            copied.contains("IdentitiesOnly=yes"),
+            "wrapped copy lost the wrap-boundary chars: {:?}",
+            copied
+        );
+    }
+
+    /// Block selection (rectangular) must NOT merge wrapped rows —
+    /// the user chose a rectangle and wants `\n`-separated lines
+    /// regardless of whether the source row had auto-wrapped.
+    #[test]
+    fn block_selection_does_not_merge_wrapped_rows() {
+        let mut t = Term::new(5, 50);
+        let mut p = crate::Processor::new();
+        let line = b"ssh -i ./.crane/secrets/login.pem -o IdentitiesOnly=yes -J ec2-user@host";
+        p.parse_bytes(&mut t, line);
+        assert!(
+            t.grid.rows[0]
+                .cells
+                .last()
+                .map(|c| c.flags.contains(Flags::WRAPLINE))
+                .unwrap_or(false),
+            "fixture broken: row 0 didn't wrap"
+        );
+        let mut sel = Selection::new(
+            SelectionType::Block,
+            Point::new(Line(0), Column(0)),
+            Side::Left,
+        );
+        sel.update(Point::new(Line(1), Column(9)), Side::Right);
+        t.selection = Some(sel);
+        let copied = t.selection_to_string().expect("non-empty selection");
+        assert!(
+            copied.contains('\n'),
+            "block selection across rows must keep `\\n` even when source row wrapped: {:?}",
+            copied
+        );
+    }
+
+    /// Multi-row reverse-wrap: a 3-row wrapped command, backspace
+    /// must walk back one row at a time (single-step) and CSI D
+    /// with a count crossing two boundaries must walk through both.
+    #[test]
+    fn move_backward_crosses_multiple_wrap_boundaries() {
+        let mut t = Term::new(8, 20);
+        let mut p = crate::Processor::new();
+        // 50 chars in a 20-col term: rows 0, 1 wrap; cursor lands
+        // at row 2, col 10.
+        let line = b"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJabcd";
+        p.parse_bytes(&mut t, line);
+        assert!(t.grid.rows[0]
+            .cells
+            .last()
+            .map(|c| c.flags.contains(Flags::WRAPLINE))
+            .unwrap_or(false));
+        assert!(t.grid.rows[1]
+            .cells
+            .last()
+            .map(|c| c.flags.contains(Flags::WRAPLINE))
+            .unwrap_or(false));
+        // CSI D enough to cross both boundaries: cursor at (2,10),
+        // step back 35 cols → 10 + 20 + 5 = 35 → (0, 15).
+        p.parse_bytes(&mut t, b"\x1b[35D");
+        assert_eq!(t.grid.cursor.row, 0, "should land on row 0 after crossing two wraps");
+        assert_eq!(t.grid.cursor.col, 15);
+    }
+
+    /// Wrap merge must work on rows already evicted to scrollback.
+    /// Build a 3-row term, type a long wrapped command, then push
+    /// it into scrollback by emitting newlines. Selecting the
+    /// scrollback rows that span the wrap should produce one
+    /// continuous logical line.
+    #[test]
+    fn selection_merges_wrapped_rows_in_scrollback() {
+        let mut t = Term::new(3, 20);
+        let mut p = crate::Processor::new();
+        // 30 chars in 20-col term: row 0 wraps into row 1.
+        p.parse_bytes(&mut t, b"abcdefghijklmnopqrstuvwxyz0123");
+        // Push the wrapped pair off the live grid.
+        p.parse_bytes(&mut t, b"\r\nfiller1\r\nfiller2\r\nfiller3\r\nfiller4\r\n");
+        // Scrollback now holds the original wrapped pair (and some
+        // filler). Walk scrollback for our wrapped row.
+        assert!(t.scrollback.len() >= 2, "need scrollback to test");
+        // The wrapped pair is the OLDEST entries — line indices in
+        // selection are negative (most recent eviction = -1, oldest
+        // visible scrollback entry = -scrollback.len()).
+        let oldest = -(t.scrollback.len() as i32);
+        let mut sel = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(oldest), Column(0)),
+            Side::Left,
+        );
+        sel.update(Point::new(Line(oldest + 1), Column(19)), Side::Right);
+        t.selection = Some(sel);
+        let copied = t.selection_to_string().expect("non-empty selection");
+        assert!(
+            !copied.contains('\n'),
+            "scrollback wrap-merge produced stray newline: {:?}",
+            copied
+        );
+        assert!(
+            copied.starts_with("abcdefghij"),
+            "scrollback wrap copy garbled prefix: {:?}",
+            copied
+        );
+    }
+
+    /// Sibling case: rows separated by an actual `\r\n` (not a wrap)
+    /// must keep their `\n` in the clipboard.
+    #[test]
+    fn selection_preserves_newline_between_unwrapped_rows() {
+        let mut t = Term::new(5, 80);
+        let mut p = crate::Processor::new();
+        p.parse_bytes(&mut t, b"first line\r\nsecond line");
+        let mut sel = Selection::new(SelectionType::Simple, Point::new(Line(0), Column(0)), Side::Left);
+        sel.update(Point::new(Line(1), Column(79)), Side::Right);
+        t.selection = Some(sel);
+        let copied = t.selection_to_string().expect("selection should produce text");
+        assert_eq!(copied, "first line\nsecond line");
+    }
 
     /// The actual fix: linefeed in the middle of the scroll region
     /// just moves the cursor down. Scrollback stays empty.
