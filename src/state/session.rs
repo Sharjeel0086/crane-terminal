@@ -497,6 +497,7 @@ impl STab {
                 frame: None,
                 generation: 0,
                 worker_rx: None,
+                filter: crate::git_log::state::FilterState::default(),
             }),
         }
     }
