@@ -779,6 +779,17 @@ pub fn render_terminal(
     let bg_theme = term_bg();
     painter.rect_filled(response.rect, 0.0, bg_theme);
 
+    // GPU-renderer scaffold: when CRANE_GPU_TERM=1, run a wgpu sub-
+    // pass over the terminal pane's content rect. v0 just paints a
+    // diagnostic gradient so we can confirm the egui_wgpu callback
+    // wires up end-to-end. Real cell-grid rendering replaces this
+    // in the next pass; until then the legacy egui Painter glyph
+    // path below still draws on top, so the toggle is visually
+    // additive — a clear "GPU layer is alive" overlay.
+    if crate::terminal::gpu_render::enabled() {
+        crate::terminal::gpu_render::paint_test_pattern(&painter, response.rect);
+    }
+
     // I-beam over the terminal so it feels like selectable text.
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Text);

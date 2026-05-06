@@ -365,6 +365,10 @@ impl eframe::App for CraneApp {
         // ran `git init` in a terminal pane). Throttled internally so
         // it's a no-op most frames.
         self.app.poll_loose_git_init(&ctx);
+        // Lazy-init the wgpu pipeline used by `CRANE_GPU_TERM=1`
+        // terminal panes. Idempotent: returns immediately on every
+        // frame after the first successful setup.
+        crate::terminal::gpu_render::ensure_initialized(frame);
         // Close-request guard: Cmd+Q / window-close button asks the
         // user before tearing down running terminals + open editors.
         // The OS / eframe surfaces the request via the viewport's
