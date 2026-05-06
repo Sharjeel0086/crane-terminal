@@ -525,32 +525,7 @@ impl Term {
         }
     }
 
-    /// Reverse-wraparound step: if the cursor sits at col 0 and the
-    /// row immediately above was filled by auto-wrap (WRAPLINE on
-    /// its last cell), move the cursor to (row-1, cols-1). Returns
-    /// `true` when the step happened. No-op + `false` at row 0 or
-    /// when the row above didn't wrap into ours.
-    fn move_back_one_with_wrap(&mut self) -> bool {
-        if self.grid.cursor.row == 0 {
-            return false;
-        }
-        let prev_row_idx = self.grid.cursor.row - 1;
-        let prev_wraps = self
-            .grid
-            .rows
-            .get(prev_row_idx)
-            .and_then(|r| r.cells.last())
-            .map(|c| c.flags.contains(Flags::WRAPLINE))
-            .unwrap_or(false);
-        if !prev_wraps {
-            return false;
-        }
-        self.grid.cursor.row = prev_row_idx;
-        self.grid.cursor.col = self.grid.columns.saturating_sub(1);
-        true
-    }
-
-    /// Reset every cell on the current row to the template, range
+/// Reset every cell on the current row to the template, range
     /// gated by `mode`. Backs `clear_line`.
     fn clear_line_range(&mut self, mode: vte::ansi::LineClearMode) {
         use vte::ansi::LineClearMode;
@@ -740,19 +715,17 @@ impl Handler for Term {
     }
 
     fn backspace(&mut self) {
+        // Plain xterm semantics: clamp at col 0. We previously did
+        // a WRAPLINE-aware reverse-wrap here to fix the bash
+        // readline + SSH `↑` history redraw bug, but it caused TUI
+        // frame duplication for apps that emit `\b` during sync
+        // redraws (Ink/Claude Code/opencode). Need a smarter gate
+        // — likely DECSET 45 or restricting to where the
+        // wrap-continuation row is the cursor's CURRENT row — but
+        // until that lands, default xterm behavior is the safer
+        // baseline.
         if self.grid.cursor.col > 0 {
             self.grid.cursor.col -= 1;
-        } else {
-            // Reverse-wraparound (terminfo `bw`, which xterm-256color
-            // advertises and crane sets as $TERM): a backspace from
-            // col 0 must cross back to (row-1, cols-1) when the row
-            // above was filled by auto-wrap (WRAPLINE on its last
-            // cell). Bash readline relies on this when redrawing
-            // multi-line wrapped commands during ↑/↓ history rotation;
-            // saturating at col 0 leaves the cursor on the
-            // continuation row and subsequent writes overlay garbage
-            // on top of the prior command.
-            self.move_back_one_with_wrap();
         }
         self.grid.cursor.input_needs_wrap = false;
     }
@@ -778,19 +751,17 @@ impl Handler for Term {
     }
 
     fn move_backward(&mut self, n: usize) {
-        // Same reverse-wraparound rule as `backspace`: step back
-        // across WRAPLINE boundaries. Readline issues `\e[<n>D`
-        // for some history-rotation paths; clamping at col 0 of
-        // the wrap-continuation row puts the cursor in the wrong
-        // place and the redraw paints over garbage.
+        // Plain xterm semantics: clamp at col 0. Reverse-wrap is
+        // only honored on `\b` (terminfo `bw`) where bash readline
+        // depends on it; CSI D is supposed to stop at the left
+        // margin. Earlier we made this also reverse-wrap, but TUIs
+        // (Ink, etc.) emit `\e[<n>D` to reset the cursor between
+        // frames, and crossing stale WRAPLINE boundaries from a
+        // prior frame teleported the cursor up several rows — the
+        // next frame painted at the wrong place and the previous
+        // frame stayed visible, looking like duplicated output.
         let n = n.max(1);
-        for _ in 0..n {
-            if self.grid.cursor.col > 0 {
-                self.grid.cursor.col -= 1;
-            } else if !self.move_back_one_with_wrap() {
-                break;
-            }
-        }
+        self.grid.cursor.col = self.grid.cursor.col.saturating_sub(n);
         self.grid.cursor.input_needs_wrap = false;
     }
 
@@ -1170,84 +1141,49 @@ mod tests {
     use crate::selection::{Selection, SelectionType};
     use vte::ansi::{Attr, ClearMode, LineClearMode};
 
-    /// User-reported regression: pressing ↑ in bash inside an SSH
-    /// session over a wrapped command leaves screen garbage. Bash
-    /// readline emits `\b` to step the cursor back across the wrap
-    /// boundary while redrawing — terminfo `xterm-256color` (which
-    /// crane sets) advertises `bw`, so readline assumes the terminal
-    /// reverse-wraps. Without this, the cursor saturates at col 0 of
-    /// the continuation row, the new prompt+command paints starting
-    /// there, and the head of the previous command stays on screen.
+    /// `\b` (backspace) clamps at col 0 — does NOT reverse-wrap by
+    /// default, even when the row above ended via auto-wrap.
+    /// xterm only honors reverse-wrap with DECSET 45 enabled, which
+    /// we don't yet implement. We previously made `\b` reverse-wrap
+    /// unconditionally to fix a bash readline + SSH wrapped-history
+    /// redraw bug, but TUI apps (Ink/Claude Code/opencode) emit `\b`
+    /// during sync redraws and the reverse-wrap teleported the
+    /// cursor across stale WRAPLINE boundaries, causing the next
+    /// frame to paint at the wrong row and producing duplicate
+    /// output. Default xterm behavior is the safer baseline until
+    /// a DECSET 45 gate lands.
     #[test]
-    fn backspace_at_col0_wraps_to_prev_row_when_prev_wraps() {
-        let mut t = Term::new(5, 50);
-        let mut p = crate::Processor::new();
-        // Auto-wrap a long line: writes spill from row 0 onto row 1.
-        // The actual wrap sets WRAPLINE on row 0's last cell.
-        let line = b"ssh -i ./.crane/secrets/login.pem -o IdentitiesOnly=yes -J ec2-user@host";
-        p.parse_bytes(&mut t, line);
-        let row0_wraps = t.grid.rows[0]
-            .cells
-            .last()
-            .map(|c| c.flags.contains(Flags::WRAPLINE))
-            .unwrap_or(false);
-        assert!(row0_wraps, "fixture broken: row 0 didn't wrap");
-        // Land cursor at the start of row 1 (the continuation),
-        // exactly where readline would place it before stepping
-        // back into the wrap.
-        p.parse_bytes(&mut t, b"\r");
-        assert_eq!(t.grid.cursor.col, 0);
-        let row_before = t.grid.cursor.row;
-        // Single \b must cross the wrap boundary.
-        p.parse_bytes(&mut t, b"\x08");
-        assert_eq!(
-            t.grid.cursor.row,
-            row_before - 1,
-            "backspace at col 0 with prev-wraps should land on prev row"
-        );
-        assert_eq!(
-            t.grid.cursor.col,
-            t.grid.columns - 1,
-            "backspace at col 0 with prev-wraps should land at last col"
-        );
-    }
-
-    /// Sibling case: backspace at col 0 of a row whose predecessor
-    /// did NOT wrap (real `\r\n` boundary) must stay put.
-    #[test]
-    fn backspace_at_col0_does_not_wrap_across_real_newline() {
-        let mut t = Term::new(5, 80);
-        let mut p = crate::Processor::new();
-        p.parse_bytes(&mut t, b"first\r\nsecond");
-        // Move to col 0 of row 1.
-        p.parse_bytes(&mut t, b"\r");
-        let row_before = t.grid.cursor.row;
-        p.parse_bytes(&mut t, b"\x08");
-        assert_eq!(t.grid.cursor.row, row_before, "must not cross real newline");
-        assert_eq!(t.grid.cursor.col, 0);
-    }
-
-    /// `\e[<n>D` (CSI D, cursor-back) should also reverse-wrap when
-    /// the request goes past col 0 and the row above wrapped.
-    #[test]
-    fn cursor_back_n_walks_across_wrap_boundary() {
+    fn backspace_at_col0_clamps_xterm_default() {
         let mut t = Term::new(5, 50);
         let mut p = crate::Processor::new();
         let line = b"ssh -i ./.crane/secrets/login.pem -o IdentitiesOnly=yes -J ec2-user@host";
         p.parse_bytes(&mut t, line);
-        // Cursor sits at the end of the wrapped command (row 1, mid-col).
-        // Walk back past col 0.
-        let target_col = t.grid.cursor.col;
+        // Land at start of the wrap continuation row.
+        p.parse_bytes(&mut t, b"\r");
         let row_before = t.grid.cursor.row;
-        // Step back enough to cross the boundary by 5 cols.
-        let n = target_col + 5;
-        let seq = format!("\x1b[{}D", n);
-        p.parse_bytes(&mut t, seq.as_bytes());
-        assert_eq!(t.grid.cursor.row, row_before - 1);
-        assert_eq!(t.grid.cursor.col, t.grid.columns - 5);
+        p.parse_bytes(&mut t, b"\x08");
+        assert_eq!(t.grid.cursor.row, row_before, "must not change rows");
+        assert_eq!(t.grid.cursor.col, 0, "must clamp at col 0");
     }
 
-    /// User-reported clipboard regression: a long shell command that
+    /// `\e[<n>D` (CSI D, cursor-back) clamps at col 0 per xterm
+    /// spec — does NOT reverse-wrap. (`\b` does, via `bw`, but only
+    /// for backspace.) Adding reverse-wrap here caused TUI redraws
+    /// that emit `\e[<n>D` between frames to teleport the cursor
+    /// across stale WRAPLINE boundaries, producing duplicated output.
+    #[test]
+    fn cursor_back_n_clamps_at_col_zero() {
+        let mut t = Term::new(5, 50);
+        let mut p = crate::Processor::new();
+        p.parse_bytes(&mut t, b"hello");
+        let row_before = t.grid.cursor.row;
+        // Step back enough that a reverse-wrap would teleport up.
+        p.parse_bytes(&mut t, b"\x1b[100D");
+        assert_eq!(t.grid.cursor.row, row_before, "CSI D must not change rows");
+        assert_eq!(t.grid.cursor.col, 0);
+    }
+
+/// User-reported clipboard regression: a long shell command that
     /// the terminal wrapped at the right margin must come out of the
     /// clipboard as one continuous logical line, not joined with a
     /// stray `\n` at the wrap point.
@@ -1323,35 +1259,7 @@ mod tests {
         );
     }
 
-    /// Multi-row reverse-wrap: a 3-row wrapped command, backspace
-    /// must walk back one row at a time (single-step) and CSI D
-    /// with a count crossing two boundaries must walk through both.
-    #[test]
-    fn move_backward_crosses_multiple_wrap_boundaries() {
-        let mut t = Term::new(8, 20);
-        let mut p = crate::Processor::new();
-        // 50 chars in a 20-col term: rows 0, 1 wrap; cursor lands
-        // at row 2, col 10.
-        let line = b"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJabcd";
-        p.parse_bytes(&mut t, line);
-        assert!(t.grid.rows[0]
-            .cells
-            .last()
-            .map(|c| c.flags.contains(Flags::WRAPLINE))
-            .unwrap_or(false));
-        assert!(t.grid.rows[1]
-            .cells
-            .last()
-            .map(|c| c.flags.contains(Flags::WRAPLINE))
-            .unwrap_or(false));
-        // CSI D enough to cross both boundaries: cursor at (2,10),
-        // step back 35 cols → 10 + 20 + 5 = 35 → (0, 15).
-        p.parse_bytes(&mut t, b"\x1b[35D");
-        assert_eq!(t.grid.cursor.row, 0, "should land on row 0 after crossing two wraps");
-        assert_eq!(t.grid.cursor.col, 15);
-    }
-
-    /// Wrap merge must work on rows already evicted to scrollback.
+/// Wrap merge must work on rows already evicted to scrollback.
     /// Build a 3-row term, type a long wrapped command, then push
     /// it into scrollback by emitting newlines. Selecting the
     /// scrollback rows that span the wrap should produce one
