@@ -184,7 +184,120 @@ pub fn load_fonts(ctx: &egui::Context, custom_mono: Option<&str>) {
         }
     }
 
+    add_system_fallback_fonts(&mut fonts);
+
     ctx.set_fonts(fonts);
+}
+
+/// Append system-installed fonts that cover non-Latin scripts (CJK,
+/// Arabic, Hebrew) to the Monospace + Proportional fallback chains.
+/// JetBrains Mono and Cascadia Mono only cover Latin / Greek / Cyrillic
+/// + a handful of symbol blocks, so anything outside that — Chinese,
+/// Japanese, Korean, Arabic, Hebrew, Hindi — would render as tofu
+/// without these. egui's per-glyph fallback tries each font in
+/// sequence, so we list them in rough order of expected hit frequency.
+fn add_system_fallback_fonts(fonts: &mut egui::FontDefinitions) {
+    // (name, path, ttc index — 0 picks the Regular face).
+    #[cfg(target_os = "macos")]
+    let candidates: &[(&str, &str, u32)] = &[
+        ("pingfang", "/System/Library/Fonts/PingFang.ttc", 0),
+        (
+            "hiragino_sans_gb",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            0,
+        ),
+        (
+            "apple_sd_gothic",
+            "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+            0,
+        ),
+        ("arial_hb", "/System/Library/Fonts/Supplemental/ArialHB.ttc", 0),
+        ("geeza_pro", "/System/Library/Fonts/Supplemental/GeezaPro.ttc", 0),
+        ("kohinoor", "/System/Library/Fonts/Kohinoor.ttc", 0),
+        ("apple_symbols", "/System/Library/Fonts/Apple Symbols.ttf", 0),
+    ];
+    #[cfg(target_os = "linux")]
+    let candidates: &[(&str, &str, u32)] = &[
+        // Noto Sans CJK ships as a single TTC with SC, TC, JP, KR
+        // faces. Path varies by distro — try the common ones in
+        // priority order.
+        (
+            "noto_cjk",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            0,
+        ),
+        (
+            "noto_cjk",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            0,
+        ),
+        (
+            "noto_cjk",
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+            0,
+        ),
+        (
+            "noto_cjk",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            0,
+        ),
+        // Older Chinese-only fallback that's still installed by default
+        // on some distros.
+        (
+            "wqy_zenhei",
+            "/usr/share/fonts/wenquanyi/wqy-zenhei.ttc",
+            0,
+        ),
+        // Arabic / Hebrew / Devanagari coverage via Noto Sans family.
+        (
+            "noto_sans_arabic",
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+            0,
+        ),
+        (
+            "noto_sans_hebrew",
+            "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
+            0,
+        ),
+        (
+            "noto_sans_devanagari",
+            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+            0,
+        ),
+    ];
+    #[cfg(target_os = "windows")]
+    let candidates: &[(&str, &str, u32)] = &[
+        ("yahei", "C:\\Windows\\Fonts\\msyh.ttc", 0),
+        ("yu_gothic", "C:\\Windows\\Fonts\\yugothm.ttc", 0),
+        ("malgun_gothic", "C:\\Windows\\Fonts\\malgun.ttf", 0),
+        ("tahoma", "C:\\Windows\\Fonts\\tahoma.ttf", 0),
+        ("arial", "C:\\Windows\\Fonts\\arial.ttf", 0),
+    ];
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let candidates: &[(&str, &str, u32)] = &[];
+
+    for (key, path, index) in candidates {
+        // Some keys appear multiple times (different distros stash
+        // Noto CJK in different paths) — first hit wins, skip the
+        // rest so the family list isn't polluted with duplicates.
+        if fonts.font_data.contains_key(*key) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let mut data = egui::FontData::from_owned(bytes);
+        data.index = *index;
+        fonts
+            .font_data
+            .insert((*key).to_string(), std::sync::Arc::new(data));
+        if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            mono.push((*key).to_string());
+        }
+        if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            prop.push((*key).to_string());
+        }
+    }
 }
 
 pub fn apply_style(ctx: &egui::Context) {
