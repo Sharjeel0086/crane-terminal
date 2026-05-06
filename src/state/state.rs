@@ -92,6 +92,26 @@ pub struct Project {
     /// Left Panel. Lets users visually distinguish projects at a glance
     /// without renaming. `None` → fall back to the theme accent.
     pub tint: Option<[u8; 3]>,
+    /// Subdirectories that should NOT appear in this Project's Files
+    /// tree because they're already exposed as their own Projects.
+    /// Set on the synthetic "loose-files" Project that owns a parent
+    /// folder containing nested git repos — those nested repos get
+    /// their own Project entries (with full git wiring), so the
+    /// parent's Files tree filters them out to avoid visual
+    /// duplication.
+    pub files_skip_paths: Vec<PathBuf>,
+}
+
+impl Project {
+    /// True when this Project has no git repo: a single placeholder
+    /// Workspace whose canonical name is `(no git)` (set by
+    /// `add_single_project` when `git::list_workspaces` came back
+    /// empty). Used by the Left Panel to flatten the tree (skip the
+    /// Workspace row, render tabs directly under the Project) and
+    /// use the folder icon instead of the git-branch one.
+    pub fn is_loose(&self) -> bool {
+        self.workspaces.len() == 1 && self.workspaces[0].name == "(no git)"
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -488,6 +508,11 @@ pub struct App {
     /// the next OS-level close request is allowed through without
     /// re-prompting. Reset on Cancel.
     pub confirmed_quit: bool,
+    /// Timestamp of the last filesystem probe for `.git` appearing
+    /// inside loose Projects. Throttled to 2 s — egui can repaint at
+    /// 60+ fps, and stat on every loose project every frame would be
+    /// wasteful. `None` = never probed yet.
+    pub last_loose_git_probe: Option<Instant>,
     next_project: ProjectId,
     next_workspace: WorkspaceId,
     next_tab: TabId,
@@ -545,6 +570,7 @@ impl App {
             group_collapsed: std::collections::HashSet::new(),
             pending_quit_modal: false,
             confirmed_quit: false,
+            last_loose_git_probe: None,
             next_project: 1,
             next_workspace: 1,
             next_tab: 1,
@@ -642,15 +668,35 @@ impl App {
                 );
                 first_id = id;
             }
-            for root in siblings {
+            for root in &siblings {
                 let id = self.add_single_project(
-                    root,
+                    root.clone(),
                     Some(path.clone()),
                     Some(group_name.clone()),
                     ctx,
                 );
                 if first_id.is_none() {
                     first_id = id;
+                }
+            }
+            // When the parent isn't itself a git repo, the loose files
+            // sitting alongside the discovered repos (README.md,
+            // scripts/, notes, etc.) wouldn't have anywhere to live —
+            // each repo's Project only shows files inside that repo.
+            // Add the parent as a synthetic non-git Project so those
+            // loose files surface in the Files Pane. Set
+            // `files_skip_paths` to the discovered repo roots so the
+            // tree walk doesn't show duplicate entries for folders
+            // that already have their own Project.
+            if !path_is_repo {
+                if let Some(id) = self.add_single_project(
+                    path.clone(),
+                    Some(path.clone()),
+                    Some(group_name.clone()),
+                    ctx,
+                ) && let Some(p) = self.projects.iter_mut().find(|p| p.id == id)
+                {
+                    p.files_skip_paths = siblings.clone();
                 }
             }
             return first_id;
@@ -730,6 +776,7 @@ impl App {
             preferred_location_mode: None,
             preferred_custom_path: None,
             tint: None,
+            files_skip_paths: Vec::new(),
         });
         if let Some((wt, tab)) = first_active
             && self.active.is_none()
@@ -1153,6 +1200,20 @@ impl App {
         Some(&wt.path)
     }
 
+    /// `files_skip_paths` for the currently-active Project, or empty.
+    /// Set on synthetic loose-files Projects that own a parent folder
+    /// containing nested git repos — the Files Pane uses this to hide
+    /// directories that are already exposed as their own Projects.
+    pub fn active_project_files_skip(&self) -> &[PathBuf] {
+        let Some((pid, _, _)) = self.active else {
+            return &[];
+        };
+        match self.projects.iter().find(|p| p.id == pid) {
+            Some(p) => &p.files_skip_paths,
+            None => &[],
+        }
+    }
+
     /// Drop any open File Tab whose path matches `path`. Called after
     /// a Files-Pane delete or move so the editor doesn't keep
     /// pointing at a non-existent file. Walks every project →
@@ -1440,6 +1501,69 @@ impl App {
 
     pub fn new_tab_in_active_workspace(&mut self, ctx: &egui::Context) {
         self.push_tab(ctx, None, None);
+    }
+
+    /// Add a tab to the given Project's first (placeholder) Workspace
+    /// and route activation to it. Used by the Left Panel's `+` button
+    /// when the Project is `is_loose()` — there's no Workspace row in
+    /// that view, so tabs land directly on the Project's single
+    /// placeholder Workspace.
+    pub fn add_tab_to_loose_project(&mut self, ctx: &egui::Context, pid: ProjectId) {
+        let Some(project) = self.projects.iter_mut().find(|p| p.id == pid) else {
+            return;
+        };
+        let Some(wt) = project.workspaces.first_mut() else {
+            return;
+        };
+        let wid = wt.id;
+        let prev_active = self.active;
+        self.active = Some((pid, wid, 0));
+        self.push_tab(ctx, None, None);
+        if let Some(new_active) = self.active {
+            if new_active.0 != pid {
+                self.active = prev_active;
+            }
+        }
+    }
+
+    /// Probe the filesystem for `.git` appearing under any loose
+    /// Project. Throttled to 2 s. Triggers a `reindex_git_state`
+    /// when one is found so the placeholder `(no git)` Workspace
+    /// gets replaced with the real branch — covers the case where
+    /// the user runs `git init` from a terminal pane and expects
+    /// Crane to notice without a restart.
+    pub fn poll_loose_git_init(&mut self, ctx: &egui::Context) {
+        const THROTTLE: std::time::Duration = std::time::Duration::from_secs(2);
+        let now = Instant::now();
+        if let Some(last) = self.last_loose_git_probe {
+            if now.duration_since(last) < THROTTLE {
+                return;
+            }
+        }
+        self.last_loose_git_probe = Some(now);
+        let any_init = self
+            .projects
+            .iter()
+            .filter(|p| !p.missing && p.is_loose())
+            .any(|p| p.path.join(".git").exists());
+        if any_init {
+            self.reindex_git_state(ctx);
+        }
+    }
+
+    /// Run `git init` on a loose Project's path and re-discover its
+    /// worktrees. The placeholder `(no git)` Workspace gets replaced
+    /// by a real branch entry on the next reindex pass.
+    pub fn init_git_for_project(&mut self, ctx: &egui::Context, pid: ProjectId) {
+        let Some(project) = self.projects.iter().find(|p| p.id == pid) else {
+            return;
+        };
+        let path = project.path.clone();
+        let _ = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&path)
+            .output();
+        self.reindex_git_state(ctx);
     }
 
     /// Open a file in the active Workspace's Files Pane and notify the LSP

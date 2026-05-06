@@ -88,6 +88,8 @@ pub struct SProject {
     pub group_name: Option<String>,
     #[serde(default)]
     pub tint: Option<[u8; 3]>,
+    #[serde(default)]
+    pub files_skip_paths: Option<Vec<PathBuf>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -262,6 +264,11 @@ impl Session {
                 group_path: p.group_path.clone(),
                 group_name: p.group_name.clone(),
                 tint: p.tint,
+                files_skip_paths: if p.files_skip_paths.is_empty() {
+                    None
+                } else {
+                    Some(p.files_skip_paths.clone())
+                },
             });
         }
 
@@ -354,6 +361,7 @@ impl Session {
                 group_path: sp.group_path,
                 group_name: sp.group_name,
                 tint: sp.tint,
+                files_skip_paths: sp.files_skip_paths.unwrap_or_default(),
             });
             if missing {
                 app.missing_project_modals.push(sp.id);

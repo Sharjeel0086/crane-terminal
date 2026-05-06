@@ -117,13 +117,36 @@ pub fn render(ui: &mut egui::Ui, app: &mut App) {
             .max_rect(strip_rect.shrink2(egui::vec2(10.0, 4.0)))
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    tab_chip(&mut strip_ui, "Changes", app.right_tab == RightTab::Changes, || {
-        app.right_tab = RightTab::Changes;
-    });
-    strip_ui.add_space(4.0);
-    tab_chip(&mut strip_ui, "Files", app.right_tab == RightTab::Files, || {
+    // Loose Projects (no `.git`) have no git status to display, so
+    // the Changes chip is greyed and unclickable. If the user lands
+    // on a loose Project while the Changes tab was previously
+    // selected, switch them to Files so they don't see a permanently
+    // empty pane.
+    let is_loose_active = app
+        .active
+        .and_then(|(pid, _, _)| app.projects.iter().find(|p| p.id == pid))
+        .map(|p| p.is_loose())
+        .unwrap_or(false);
+    if is_loose_active && app.right_tab == RightTab::Changes {
         app.right_tab = RightTab::Files;
-    });
+    }
+    tab_chip(
+        &mut strip_ui,
+        "Changes",
+        app.right_tab == RightTab::Changes,
+        is_loose_active,
+        if is_loose_active { Some("No git in this project") } else { None },
+        || app.right_tab = RightTab::Changes,
+    );
+    strip_ui.add_space(4.0);
+    tab_chip(
+        &mut strip_ui,
+        "Files",
+        app.right_tab == RightTab::Files,
+        false,
+        None,
+        || app.right_tab = RightTab::Files,
+    );
 
     ui.allocate_rect(strip_rect, egui::Sense::hover());
     ui.add_space(2.0);
@@ -134,8 +157,24 @@ pub fn render(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-fn tab_chip(ui: &mut egui::Ui, label: &str, active: bool, mut on_click: impl FnMut()) {
-    let color = if active { text() } else { muted() };
+fn tab_chip(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: bool,
+    disabled: bool,
+    disabled_tooltip: Option<&str>,
+    mut on_click: impl FnMut(),
+) {
+    // Disabled chips render at half-opacity in the muted color and
+    // ignore clicks. An optional tooltip explains why ("No git in
+    // this project") so the dimmed state isn't a mystery.
+    let color = if disabled {
+        muted().linear_multiply(0.6)
+    } else if active {
+        text()
+    } else {
+        muted()
+    };
     let resp = ui
         .scope(|ui| {
             let v = ui.visuals_mut();
@@ -144,13 +183,14 @@ fn tab_chip(ui: &mut egui::Ui, label: &str, active: bool, mut on_click: impl FnM
             v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
             v.widgets.hovered.bg_stroke = egui::Stroke::NONE;
             v.widgets.active.bg_stroke = egui::Stroke::NONE;
-            let r = ui.add(
+            let r = ui.add_enabled(
+                !disabled,
                 egui::Button::new(
                     RichText::new(label).size(12.5).color(color),
                 )
                 .min_size(egui::vec2(0.0, 26.0)),
             );
-            if active {
+            if active && !disabled {
                 let rect = r.rect;
                 ui.painter().line_segment(
                     [
@@ -163,7 +203,12 @@ fn tab_chip(ui: &mut egui::Ui, label: &str, active: bool, mut on_click: impl FnM
             r
         })
         .inner;
-    if resp.clicked() {
+    if let Some(tip) = disabled_tooltip {
+        if disabled {
+            resp.clone().on_hover_text(tip);
+        }
+    }
+    if !disabled && resp.clicked() {
         on_click();
     }
 }
@@ -854,6 +899,7 @@ fn render_files(ui: &mut egui::Ui, app: &mut App) {
     let mut open_diff: Option<String> = None;
     let selected_snapshot = app.selected_file.clone();
     let mut selected_file: Option<PathBuf> = None;
+    let skip_paths: Vec<PathBuf> = app.active_project_files_skip().to_vec();
     egui::ScrollArea::vertical()
         .id_salt("right_files")
         .auto_shrink([false, false])
@@ -878,6 +924,7 @@ fn render_files(ui: &mut egui::Ui, app: &mut App) {
                 &path,
                 &git_status_map,
                 &mut opened_preview,
+                &skip_paths,
             );
             // Sink for right-clicks on the empty space below entries
             // — `interact` claims the rest of the ScrollArea's height
@@ -996,6 +1043,7 @@ fn render_fs_dir(
     workspace_root: &std::path::Path,
     git_status_map: &HashMap<String, (git::ChangeStatus, bool, bool)>,
     opened_preview: &mut bool,
+    skip_paths: &[PathBuf],
 ) {
     if depth > 64 {
         return;
@@ -1034,6 +1082,13 @@ fn render_fs_dir(
             continue;
         }
         let entry_path = e.path();
+        // Loose-files Project hides directories that are already
+        // exposed as their own Project (nested git repos under a
+        // non-git parent). Without this, every nested repo would
+        // appear twice in the Left + Right Panels.
+        if skip_paths.iter().any(|p| p == &entry_path) {
+            continue;
+        }
         let is_dir = entry_path.is_dir();
         let is_expanded = is_dir && expanded.contains(&entry_path);
         let is_selected = selected.is_some_and(|s| s == entry_path);
@@ -1200,6 +1255,7 @@ fn render_fs_dir(
                 workspace_root,
                 git_status_map,
                 opened_preview,
+                skip_paths,
             );
         }
     }

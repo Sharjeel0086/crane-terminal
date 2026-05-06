@@ -361,6 +361,10 @@ impl eframe::App for CraneApp {
         }
         self.app.ensure_initial(&ctx);
         self.app.sync_tab_mru();
+        // Notice when `.git` appears inside a loose Project (e.g. user
+        // ran `git init` in a terminal pane). Throttled internally so
+        // it's a no-op most frames.
+        self.app.poll_loose_git_init(&ctx);
         // Close-request guard: Cmd+Q / window-close button asks the
         // user before tearing down running terminals + open editors.
         // The OS / eframe surfaces the request via the viewport's

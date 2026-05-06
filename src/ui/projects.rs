@@ -162,6 +162,14 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
     let mut close_tab: Option<(u64, u64, u64)> = None;
     let mut new_tab_for_worktree: Option<(u64, u64)> = None;
     let mut new_workspace_for_project: Option<u64> = None;
+    // Loose Projects: clicking the `+` on the Project header adds a
+    // tab on the placeholder Workspace directly (skipping the New
+    // Workspace modal — there's no git, no worktree concept).
+    let mut add_tab_to_loose: Option<u64> = None;
+    // Loose Project context-menu "Initialize Git" target. The apply
+    // stage runs `git init` and triggers `reindex_git_state` so the
+    // placeholder Workspace gets replaced with the real branch.
+    let mut init_git_for: Option<u64> = None;
     let mut remove_project: Option<u64> = None;
     let mut remove_worktree: Option<(u64, u64)> = None;
     // Pending tint change from a context-menu color pick.
@@ -364,6 +372,7 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                     continue;
                 }
                 let project_depth = if in_group { 1 } else { 0 };
+                let is_loose = project.is_loose();
                 let tint_color = project
                     .tint
                     .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b));
@@ -388,12 +397,13 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                 // in-place; the group recomputes cleanly next frame.
                 let allow_individual_remove = !in_multi_group || project.missing;
                 let row_trailing_count = if allow_individual_remove { 2 } else { 1 };
+                let project_icon = if is_loose { icons::FOLDER } else { icons::CUBE };
                 let row = draw_row(
                     ui,
                     RowConfig {
                         depth: project_depth,
                         expanded: Some(project.expanded),
-                        leading: Some(icons::CUBE),
+                        leading: Some(project_icon),
                         leading_color: Some(tint_color.unwrap_or_else(accent)),
                         label: &project.name,
                         label_color: tint_color,
@@ -410,13 +420,18 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                 // group. In that case the group must be removed
                 // atomically via the folder header's "Remove folder
                 // group" context menu.
+                // For loose Projects the `+` button creates a tab on
+                // the placeholder Workspace directly (no worktree
+                // concept — there's no git). For git Projects it
+                // opens the New Workspace modal.
+                let plus_tooltip = if is_loose { "New tab" } else { "New worktree" };
                 let project_trailing = if allow_individual_remove {
                     draw_trailing(
                         ui,
                         row.rect,
                         row.hovered,
                         &[
-                            (icons::PLUS, "New worktree", 0),
+                            (icons::PLUS, plus_tooltip, 0),
                             (icons::X, "Remove project", 1),
                         ],
                     )
@@ -425,11 +440,15 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                         ui,
                         row.rect,
                         row.hovered,
-                        &[(icons::PLUS, "New worktree", 0)],
+                        &[(icons::PLUS, plus_tooltip, 0)],
                     )
                 };
                 if project_trailing[0] {
-                    new_workspace_for_project = Some(project.id);
+                    if is_loose {
+                        add_tab_to_loose = Some(project.id);
+                    } else {
+                        new_workspace_for_project = Some(project.id);
+                    }
                 } else if allow_individual_remove
                     && project_trailing.get(1).copied().unwrap_or(false)
                 {
@@ -522,6 +541,17 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                         set_tint = Some((pid, None));
                         ui.close();
                     }
+                    // Loose Projects (no `.git`) get an "Initialize
+                    // Git" entry that runs `git init` and refreshes
+                    // the Project so its placeholder Workspace gets
+                    // replaced with the real branch.
+                    if is_loose {
+                        ui.separator();
+                        if ui.button(format!("{}  Initialize Git", icons::GIT_BRANCH)).clicked() {
+                            init_git_for = Some(pid);
+                            ui.close();
+                        }
+                    }
                     // Only expose individual Remove when this Project
                     // isn't part of a multi-member folder group —
                     // those must be removed atomically via the folder
@@ -540,6 +570,14 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
 
                 if project.expanded {
                     for wt in project.workspaces.iter() {
+                        // Loose Projects flatten the tree: the
+                        // placeholder Workspace row is hidden and
+                        // its tabs render directly under the Project.
+                        // The Workspace row block below is gated on
+                        // `!is_loose`, but the per-row state used by
+                        // the tab loop (active flag, renaming, etc.)
+                        // still computes — only the visible row is
+                        // suppressed.
                         let active_wt = app.active.map(|(_, w, _)| w == wt.id).unwrap_or(false);
                         let t = crate::theme::current();
                         let badge = wt.git_status.as_ref().and_then(|s| {
@@ -549,6 +587,13 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                                 None
                             }
                         });
+                        if is_loose {
+                            // Skip past the Workspace row entirely —
+                            // the tab-rendering block below handles
+                            // the rest, with `tab_depth` adjusted to
+                            // sit one indent shallower.
+                            let _ = (active_wt, badge);
+                        } else {
                         let wt_renaming = renaming_wt_ref
                             .as_ref()
                             .map(|(p, w, _)| *p == project.id && *w == wt.id)
@@ -745,8 +790,9 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                                 ui.close();
                             }
                         });
+                        } // end `if !is_loose` for the Workspace row
 
-                        if wt.expanded {
+                        if wt.expanded || is_loose {
                             for tab in wt.tabs.iter() {
                                 let is_active = app
                                     .active
@@ -829,7 +875,17 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                                     }
                                     continue;
                                 }
-                                let tab_depth = if in_group { 3 } else { 2 };
+                                // Loose Projects skip the Workspace
+                                // row, so the tab indent is one level
+                                // shallower (sits directly under the
+                                // Project header).
+                                let tab_depth = if is_loose {
+                                    if in_group { 2 } else { 1 }
+                                } else if in_group {
+                                    3
+                                } else {
+                                    2
+                                };
                                 let tab_tint_color = tab
                                     .tint
                                     .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b));
@@ -1101,6 +1157,12 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
     }
     if let Some(pid) = new_workspace_for_project {
         app.open_new_workspace_modal(pid);
+    }
+    if let Some(pid) = add_tab_to_loose {
+        app.add_tab_to_loose_project(ctx, pid);
+    }
+    if let Some(pid) = init_git_for {
+        app.init_git_for_project(ctx, pid);
     }
     if let Some(pid) = remove_project {
         app.remove_project(pid);
