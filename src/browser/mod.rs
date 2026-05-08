@@ -38,7 +38,6 @@ pub type SlotKey = (PaneId, u32);
 
 struct Slot {
     webview: WebView,
-    last_rect: Option<egui::Rect>,
     loaded_url: String,
 }
 
@@ -356,10 +355,12 @@ impl BrowserHost {
             match self.slots.get_mut(key) {
                 Some(slot) => {
                     let _ = slot.webview.set_visible(true);
-                    if slot.last_rect.map(|r| r != *rect).unwrap_or(true) {
-                        let _ = slot.webview.set_bounds(wry_rect);
-                        slot.last_rect = Some(*rect);
-                    }
+                    // Always re-apply bounds. The previous "only on
+                    // change" short-circuit caused the WKWebView to
+                    // get stuck at a stale frame in DMG-launched
+                    // builds. setFrame: is one AppKit call per frame —
+                    // cheap.
+                    let _ = slot.webview.set_bounds(wry_rect);
                     if slot.loaded_url != *url && !url.is_empty() {
                         let _ = slot.webview.load_url(url);
                         slot.loaded_url = url.clone();
@@ -374,7 +375,7 @@ impl BrowserHost {
                     }
                 }
                 None => {
-                    if let Some(mut slot) = build_slot(
+                    if let Some(slot) = build_slot(
                         window,
                         ctx,
                         wry_rect,
@@ -383,7 +384,6 @@ impl BrowserHost {
                         self.loading.clone(),
                         self.url_updates.clone(),
                     ) {
-                        slot.last_rect = Some(*rect);
                         self.slots.insert(*key, slot);
                     }
                 }
@@ -530,7 +530,6 @@ fn build_slot<W: HasWindowHandle>(
             let _ = webview.set_visible(false);
             Some(Slot {
                 webview,
-                last_rect: None,
                 loaded_url: url.to_string(),
             })
         }
