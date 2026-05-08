@@ -513,6 +513,11 @@ pub struct App {
     /// 60+ fps, and stat on every loose project every frame would be
     /// wasteful. `None` = never probed yet.
     pub last_loose_git_probe: Option<Instant>,
+    /// Timestamp of the last poll for Workspaces whose backing
+    /// directory has disappeared (the user ran `git worktree remove`
+    /// from a terminal pane). Throttled to 3 s. `None` = never
+    /// probed yet.
+    pub last_worktree_prune: Option<Instant>,
     next_project: ProjectId,
     next_workspace: WorkspaceId,
     next_tab: TabId,
@@ -571,6 +576,7 @@ impl App {
             pending_quit_modal: false,
             confirmed_quit: false,
             last_loose_git_probe: None,
+            last_worktree_prune: None,
             next_project: 1,
             next_workspace: 1,
             next_tab: 1,
@@ -809,6 +815,12 @@ impl App {
     /// missing-project modal flow already handles them.
     pub fn reindex_git_state(&mut self, ctx: &egui::Context) {
         use std::collections::HashSet;
+
+        // Drop Workspaces whose backing directory has disappeared
+        // before we recompute scan roots and add new ones — that
+        // way the Left Panel never shows a "ghost" row alongside a
+        // freshly-discovered replacement on the same branch.
+        self.prune_dead_worktrees();
 
         let existing_project_paths: HashSet<PathBuf> =
             self.projects.iter().map(|p| p.path.clone()).collect();
@@ -1549,6 +1561,65 @@ impl App {
         if any_init {
             self.reindex_git_state(ctx);
         }
+    }
+
+    /// Drop in-memory Workspaces whose backing directory has
+    /// disappeared from disk — the signal we get when the user runs
+    /// `git worktree remove` (or `rm -rf`) on a worktree from a
+    /// terminal pane. Without this, the Left Panel keeps showing
+    /// stale branch rows whose Tabs / Terminals point at dead paths.
+    ///
+    /// Returns the ids of the Workspaces that were removed so the
+    /// caller can sanitize cursors that referenced them. Cheap:
+    /// only stats `path.exists()` per Workspace, no git subprocess.
+    fn prune_dead_worktrees(&mut self) -> Vec<WorkspaceId> {
+        let mut pruned: Vec<WorkspaceId> = Vec::new();
+        for project in self.projects.iter_mut() {
+            if project.missing || !project.path.exists() {
+                continue;
+            }
+            project.workspaces.retain(|w| {
+                if w.path.exists() {
+                    true
+                } else {
+                    pruned.push(w.id);
+                    false
+                }
+            });
+        }
+        if pruned.is_empty() {
+            return pruned;
+        }
+        if let Some((_, wid, _)) = self.active
+            && pruned.contains(&wid)
+        {
+            self.active = None;
+        }
+        if let Some((_, wid)) = self.last_workspace
+            && pruned.contains(&wid)
+        {
+            self.last_workspace = None;
+        }
+        pruned
+    }
+
+    /// Per-frame poll that prunes Workspaces whose backing directory
+    /// has disappeared (covers `git worktree remove` run from a
+    /// terminal pane). Throttled to 3 s. Lightweight — only stats
+    /// each Workspace path, no git subprocess. Adding new worktrees
+    /// discovered externally still needs a `reindex_git_state` pass
+    /// (startup / `git init`); pruning is the common case and the
+    /// one users actually notice.
+    pub fn poll_dead_worktrees(&mut self, _ctx: &egui::Context) {
+        const THROTTLE: std::time::Duration = std::time::Duration::from_secs(3);
+        let now = Instant::now();
+        if let Some(last) = self.last_worktree_prune
+            && now.duration_since(last) < THROTTLE
+        {
+            return;
+        }
+        self.last_worktree_prune = Some(now);
+        self.prune_dead_worktrees();
     }
 
     /// Run `git init` on a loose Project's path and re-discover its

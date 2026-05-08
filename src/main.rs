@@ -365,6 +365,9 @@ impl eframe::App for CraneApp {
         // ran `git init` in a terminal pane). Throttled internally so
         // it's a no-op most frames.
         self.app.poll_loose_git_init(&ctx);
+        // Drop Workspaces whose worktree was deleted from a terminal
+        // pane (`git worktree remove`). Throttled internally to 3 s.
+        self.app.poll_dead_worktrees(&ctx);
         // Lazy-init the wgpu pipeline used by `CRANE_GPU_TERM=1`
         // terminal panes. Idempotent: returns immediately on every
         // frame after the first successful setup.
