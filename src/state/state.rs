@@ -1,3 +1,4 @@
+use crate::file_watcher::{ChangeEvent, FileWatcher};
 use crate::git::{self, GitStatus};
 use crate::jobs::{JobHandle, JobKey, JobOutput, JobSystem, Pool, Priority, Scope};
 use crate::state::layout::Layout;
@@ -528,6 +529,13 @@ pub struct App {
     /// highlight / parse migrations. Lazy-initialized on first use so
     /// a session that never opens a workspace pays no thread cost.
     pub jobs: Option<Arc<JobSystem>>,
+    /// Cross-platform filesystem watcher. Lazy-init alongside `jobs`.
+    /// On every refresh tick we drain `fs_events` and force-stale any
+    /// workspaces whose paths were touched, so `git status` reruns
+    /// near-instantly on real change instead of waiting for the next
+    /// interval poll. The interval poll remains as a safety net.
+    pub file_watcher: Option<FileWatcher>,
+    pub fs_events: Option<std::sync::mpsc::Receiver<ChangeEvent>>,
     next_project: ProjectId,
     next_workspace: WorkspaceId,
     next_tab: TabId,
@@ -588,6 +596,8 @@ impl App {
             last_loose_git_probe: None,
             last_worktree_prune: None,
             jobs: None,
+            file_watcher: None,
+            fs_events: None,
             next_project: 1,
             next_workspace: 1,
             next_tab: 1,
@@ -800,6 +810,12 @@ impl App {
         {
             self.active = Some((id, wt, tab));
             self.last_workspace = Some((id, wt));
+        }
+        if let Some(fw) = self.file_watcher.as_ref()
+            && let Some(p) = self.projects.iter().find(|p| p.id == id)
+            && !p.missing
+        {
+            let _ = fw.watch_project(id, p.path.clone());
         }
         Some(id)
     }
@@ -1798,24 +1814,66 @@ impl App {
     pub fn refresh_active_git_status(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         let active_wid = self.active.map(|(_, w, _)| w);
-        // Active workspace polls at 1s for snappy feedback while the
-        // user is interacting. Inactive workspaces poll at 5s so the
-        // Left Panel +N/-N badges update for branches touched by
-        // sub-agents or external git operations without burning a git
-        // subprocess per workspace per second.
+        // With FileWatcher live, real changes invalidate `last_status_refresh`
+        // within ~50 ms — the interval poll below is the safety net for
+        // changes the watcher misses (network drives, OS event drops,
+        // remote ops via git fetch). Active 1 s, inactive 5 s.
         let active_interval = Duration::from_millis(1000);
         let inactive_interval = Duration::from_millis(5000);
 
-        // Lazy-init: a session with no projects pays zero thread cost.
-        // After FileWatcher migration this whole interval-poll block
-        // becomes a fallback; for now it drives status updates.
-        let jobs = self.jobs.get_or_insert_with(|| {
-            let ctx = ctx.clone();
+        // Lazy-init JobSystem + FileWatcher together. A session with no
+        // projects pays zero thread cost.
+        if self.jobs.is_none() {
+            let ctx_clone = ctx.clone();
             let repaint: Arc<dyn Fn() + Send + Sync> =
-                Arc::new(move || ctx.request_repaint());
-            JobSystem::new(Some(repaint))
-        });
-        let jobs = Arc::clone(jobs);
+                Arc::new(move || ctx_clone.request_repaint());
+            self.jobs = Some(JobSystem::new(Some(repaint)));
+        }
+        if self.file_watcher.is_none() {
+            match FileWatcher::new() {
+                Ok(fw) => {
+                    self.fs_events = fw.take_receiver();
+                    // Watch every existing project root. Subsequent
+                    // additions go through `add_project_*` which calls
+                    // watch_project directly.
+                    for p in &self.projects {
+                        if !p.missing {
+                            let _ = fw.watch_project(p.id, p.path.clone());
+                        }
+                    }
+                    self.file_watcher = Some(fw);
+                }
+                Err(e) => {
+                    log::warn!("FileWatcher init failed: {e}");
+                }
+            }
+        }
+        let jobs = Arc::clone(self.jobs.as_ref().expect("jobs init"));
+
+        // Drain coalesced filesystem events. For each affected project,
+        // mark workspaces under it as "due now" so the next loop block
+        // picks them up. The watcher does the heavy filtering (.git
+        // internals, editor noise); we only forward the project_id.
+        if let Some(rx) = self.fs_events.as_ref() {
+            let mut touched_projects: HashSet<ProjectId> = HashSet::new();
+            while let Ok(ev) = rx.try_recv() {
+                touched_projects.insert(ev.project);
+            }
+            if !touched_projects.is_empty() {
+                for project in self.projects.iter_mut() {
+                    if !touched_projects.contains(&project.id) {
+                        continue;
+                    }
+                    for wt in project.workspaces.iter_mut() {
+                        // Force the next iteration to consider this
+                        // workspace due. We don't cancel the in-flight
+                        // job because key dedup will supersede it on
+                        // submit; the older Cancelled result is dropped.
+                        wt.last_status_refresh = None;
+                    }
+                }
+            }
+        }
 
         for project in self.projects.iter_mut() {
             // Skip polls on projects whose root folder is gone. Spares
@@ -2214,6 +2272,12 @@ impl App {
             .iter()
             .find(|p| p.id == pid)
             .and_then(|p| p.group_path.clone());
+        if let Some(fw) = self.file_watcher.as_ref() {
+            fw.unwatch_project(pid);
+        }
+        if let Some(jobs) = self.jobs.as_ref() {
+            jobs.cancel_scope(Scope::Project(pid));
+        }
         self.projects.retain(|p| p.id != pid);
         if let Some((p, _, _)) = self.active
             && p == pid {
