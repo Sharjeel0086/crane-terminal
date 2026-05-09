@@ -1827,7 +1827,9 @@ impl App {
             let ctx_clone = ctx.clone();
             let repaint: Arc<dyn Fn() + Send + Sync> =
                 Arc::new(move || ctx_clone.request_repaint());
-            self.jobs = Some(JobSystem::new(Some(repaint)));
+            let js = JobSystem::new(Some(repaint));
+            crate::jobs::install(Arc::clone(&js));
+            self.jobs = Some(js);
         }
         if self.file_watcher.is_none() {
             match FileWatcher::new() {

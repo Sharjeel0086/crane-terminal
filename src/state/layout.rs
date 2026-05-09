@@ -134,6 +134,14 @@ pub struct DiffTabData {
     /// Horizontal scroll offsets for side-by-side mode (left/right halves).
     pub sbs_h_scroll_left: f32,
     pub sbs_h_scroll_right: f32,
+    /// Cached diff computation. Pure function of (left_text, right_text,
+    /// repo_path, right_path) — when any of those change, the cache is
+    /// invalidated and a new job is submitted to JobSystem. Render reads
+    /// from this directly with zero allocation on the cache-hit path.
+    pub computed: Option<std::sync::Arc<crate::views::diff_view::DiffComputed>>,
+    pub compute_job: Option<crate::jobs::JobHandle<crate::views::diff_view::DiffComputed>>,
+    pub computed_fingerprint: u64,
+    pub job_fingerprint: u64,
 }
 
 impl DiffTabData {
@@ -317,6 +325,10 @@ impl FilesPane {
             pending_hunk_stage: false,
             sbs_h_scroll_left: 0.0,
             sbs_h_scroll_right: 0.0,
+            computed: None,
+            compute_job: None,
+            computed_fingerprint: 0,
+            job_fingerprint: 0,
         }));
         self.active = self.tabs.len() - 1;
     }

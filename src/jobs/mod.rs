@@ -19,3 +19,20 @@ mod tests;
 pub use system::{
     CancelToken, JobHandle, JobKey, JobOutput, JobSystem, Pool, Priority, Scope,
 };
+
+use std::sync::{Arc, OnceLock};
+
+static GLOBAL: OnceLock<Arc<JobSystem>> = OnceLock::new();
+
+/// Install the process-wide JobSystem. Called once by App on first
+/// init. Subsequent calls no-op (the first installation wins).
+pub fn install(jobs: Arc<JobSystem>) {
+    let _ = GLOBAL.set(jobs);
+}
+
+/// Read the process-wide JobSystem. None until `install` has been
+/// called. Render code uses this to submit jobs without plumbing an
+/// Arc through every function signature — lock-free read.
+pub fn global() -> Option<Arc<JobSystem>> {
+    GLOBAL.get().map(Arc::clone)
+}
