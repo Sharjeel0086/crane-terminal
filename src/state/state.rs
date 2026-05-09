@@ -344,7 +344,11 @@ pub struct BranchPickerState {
     pub opened_at: Option<Instant>,
     pub error: Option<String>,
     pub loading: bool,
-    pub rx: Option<std::sync::mpsc::Receiver<Vec<(PathBuf, Vec<String>, Vec<String>)>>>,
+    /// In-flight branch-list job. Replaces the previous
+    /// thread-per-open + ad-hoc mpsc::channel pattern; goes through
+    /// the JobSystem I/O pool with key dedup so rapid open/close
+    /// cycles don't queue multiple redundant scans.
+    pub job: Option<crate::jobs::JobHandle<Vec<(PathBuf, Vec<String>, Vec<String>)>>>,
     /// Per-repo branch data loaded when the picker opens:
     /// repo_root → (local branches, remote branches in `remote/branch` form).
     pub repos: Vec<(PathBuf, Vec<String>, Vec<String>)>,
@@ -363,7 +367,7 @@ impl Default for BranchPickerState {
             opened_at: None,
             error: None,
             loading: false,
-            rx: None,
+            job: None,
             repos: Vec::new(),
             filter: None,
         }
@@ -1858,8 +1862,17 @@ impl App {
         // internals, editor noise); we only forward the project_id.
         if let Some(rx) = self.fs_events.as_ref() {
             let mut touched_projects: HashSet<ProjectId> = HashSet::new();
+            let cache = crate::dir_cache::global();
             while let Ok(ev) = rx.try_recv() {
                 touched_projects.insert(ev.project);
+                // Invalidate the parent dir of every changed path —
+                // belt-and-braces over the mtime self-invalidation.
+                // Cheap: each parent is one HashMap remove.
+                for p in ev.paths.iter() {
+                    if let Some(parent) = p.parent() {
+                        cache.invalidate(parent);
+                    }
+                }
             }
             if !touched_projects.is_empty() {
                 for project in self.projects.iter_mut() {

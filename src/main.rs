@@ -3,6 +3,7 @@ mod browser;
 mod format;
 #[cfg(target_os = "macos")]
 mod mac_keys;
+mod dir_cache;
 mod file_watcher;
 mod git;
 mod jobs;
