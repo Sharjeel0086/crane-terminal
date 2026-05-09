@@ -44,6 +44,24 @@ pub struct DiffComputed {
     pub right_lines_count: usize,
 }
 
+impl DiffComputed {
+    /// Sentinel returned when a job is cancelled mid-compute. Render
+    /// treats this the same as a cache miss.
+    fn empty() -> Self {
+        Self {
+            rows: Vec::new(),
+            tags: Vec::new(),
+            hunk_starts: Vec::new(),
+            hunk_patches: Vec::new(),
+            row_to_hunk: Vec::new(),
+            ldigits: 0,
+            rdigits: 0,
+            left_lines_count: 0,
+            right_lines_count: 0,
+        }
+    }
+}
+
 fn compute_fingerprint(tab: &DiffTabData) -> u64 {
     let mut h = DefaultHasher::new();
     tab.left_text.hash(&mut h);
@@ -57,12 +75,20 @@ fn compute_fingerprint(tab: &DiffTabData) -> u64 {
 /// The expensive bit. Pulled out of the render path so JobSystem can
 /// run it on the I/O pool — `git diff` shells out a subprocess (the
 /// real latency culprit) and `TextDiff::from_lines` walks both texts.
+///
+/// Cancel-checks at phase boundaries so a tab closing mid-compute
+/// frees the worker quickly. Cancellation is cooperative — we never
+/// abort mid-syscall, only at safe points.
 fn compute_diff(
     left_text: String,
     right_text: String,
     repo_path: Option<String>,
     right_path: String,
+    cancel: &crate::jobs::CancelToken,
 ) -> DiffComputed {
+    if cancel.is_cancelled() {
+        return DiffComputed::empty();
+    }
     let diff = TextDiff::from_lines(&left_text, &right_text);
     let left_lines_count = left_text.lines().count().max(1);
     let right_lines_count = right_text.lines().count().max(1);
@@ -96,6 +122,10 @@ fn compute_diff(
             hunk_starts.push(i);
         }
         in_hunk = changed;
+    }
+
+    if cancel.is_cancelled() {
+        return DiffComputed::empty();
     }
 
     // Per-hunk patches via `git diff` (subprocess) + parse_hunks. The
@@ -202,7 +232,7 @@ pub fn render_diff_body(
             },
             Priority::Foreground,
             Pool::Io,
-            move |_tok| compute_diff(left_text, right_text, repo_path, right_path),
+            move |tok| compute_diff(left_text, right_text, repo_path, right_path, tok),
         );
         tab.compute_job = Some(handle);
         tab.job_fingerprint = fingerprint;

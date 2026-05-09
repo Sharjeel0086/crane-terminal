@@ -65,7 +65,10 @@ impl CancelToken {
         self.0.load(Ordering::Acquire)
     }
 
-    fn cancel(&self) {
+    /// Flip the token. Future `is_cancelled()` calls return true.
+    /// Public so callers holding a `JobHandle` can cancel directly
+    /// (e.g. closing a tab whose compute job is still running).
+    pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
 }

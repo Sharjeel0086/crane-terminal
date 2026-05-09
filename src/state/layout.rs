@@ -335,6 +335,15 @@ impl FilesPane {
 
     pub fn close(&mut self, idx: usize) {
         if idx < self.tabs.len() {
+            // Cancel any in-flight background job owned by the closing
+            // tab so the worker exits at its next checkpoint instead of
+            // burning ~50–200 ms finishing a compute whose result will
+            // be dropped.
+            if let TabKind::Diff(dt) = &self.tabs[idx]
+                && let Some(handle) = dt.compute_job.as_ref()
+            {
+                handle.cancel_token().cancel();
+            }
             self.tabs.remove(idx);
             if self.active >= self.tabs.len() && !self.tabs.is_empty() {
                 self.active = self.tabs.len() - 1;
