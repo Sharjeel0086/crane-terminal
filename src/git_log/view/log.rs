@@ -749,40 +749,19 @@ fn paint_lane(
                     egui::Stroke::new(1.5, next_color),
                 );
             } else {
-                // The bezier ends at the next dot's center. Anti-
-                // aliasing on the bezier's endpoint plus the filled
-                // dot drawn on top leaves a 1–2 px gap where the curve
-                // visually fails to meet the lane below — the user
-                // sees the branch "not touching" the lane it merges
-                // into. Extend the bezier endpoint ~DOT_R past the
-                // dot center so the curve visibly enters the dot,
-                // then the filled dot covers the overshoot cleanly.
                 let mid_y = dot_y + ROW_H * 0.5;
                 let cp = egui::pos2(p_x, mid_y);
                 let bezier = egui::epaint::QuadraticBezierShape {
                     points: [
                         egui::pos2(dot_x, dot_y),
                         cp,
-                        egui::pos2(p_x, next_dot_y + DOT_R),
+                        egui::pos2(p_x, next_dot_y),
                     ],
                     closed: false,
                     fill: Color32::TRANSPARENT,
                     stroke: egui::Stroke::new(1.5, next_color).into(),
                 };
                 ui.painter().add(bezier);
-
-                // Anchor segment: short vertical line at the merge
-                // lane from the next row's top edge to the dot
-                // center. Guarantees a visible connection even when
-                // the next row renders its dot WITHOUT a passthrough
-                // (which is the "merge into existing lane" case).
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(p_x, next_dot_y - ROW_H * 0.5),
-                        egui::pos2(p_x, next_dot_y),
-                    ],
-                    egui::Stroke::new(1.5, next_color),
-                );
             }
         }
     }
