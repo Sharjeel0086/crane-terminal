@@ -121,29 +121,21 @@ pub fn render(
                 request_close = true;
             }
             ui.add_space(4.0);
-            // Refs / Details collapse toggles. Lives in the header
-            // strip so the splitter stays a clean drag handle.
-            let refs_label = if state.col_refs_collapsed {
-                icons::SIDEBAR
-            } else {
-                icons::SIDEBAR_SIMPLE
-            };
-            if ui
-                .button(refs_label)
-                .on_hover_text(if state.col_refs_collapsed {
-                    "Show refs panel"
-                } else {
-                    "Hide refs panel"
-                })
-                .clicked()
-            {
-                state.col_refs_collapsed = !state.col_refs_collapsed;
-            }
-            ui.add_space(2.0);
+            // Refs / Details collapse toggles. Order matters in this
+            // right_to_left layout — the first button rendered ends
+            // up RIGHTMOST. We want visual position to match panel
+            // side: details (right panel) toggle next to X on the
+            // right, refs (left panel) toggle to the left of that.
+            //
+            // Icons point in the direction the panel will move when
+            // clicked: ARROW_LINE_RIGHT on the details button means
+            // "click to collapse this panel to the right edge"; when
+            // collapsed it flips to ARROW_LINE_LEFT meaning "click
+            // to bring it back from the right".
             let details_label = if state.col_details_collapsed {
-                icons::SIDEBAR
+                icons::ARROW_LINE_LEFT
             } else {
-                icons::SIDEBAR_SIMPLE
+                icons::ARROW_LINE_RIGHT
             };
             if ui
                 .button(details_label)
@@ -155,6 +147,23 @@ pub fn render(
                 .clicked()
             {
                 state.col_details_collapsed = !state.col_details_collapsed;
+            }
+            ui.add_space(2.0);
+            let refs_label = if state.col_refs_collapsed {
+                icons::ARROW_LINE_RIGHT
+            } else {
+                icons::ARROW_LINE_LEFT
+            };
+            if ui
+                .button(refs_label)
+                .on_hover_text(if state.col_refs_collapsed {
+                    "Show refs panel"
+                } else {
+                    "Hide refs panel"
+                })
+                .clicked()
+            {
+                state.col_refs_collapsed = !state.col_refs_collapsed;
             }
             ui.add_space(4.0);
             if ui
