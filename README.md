@@ -46,12 +46,20 @@ Grab the latest build for your platform from the [Releases](https://github.com/r
 ### Panes
 - **Split panes** with draggable dividers; horizontal / vertical splits via `Cmd+D` / `Cmd+Shift+D`. Focus border highlights the active pane.
 - **Pane types:**
-  - **Terminal** — in-house VT parser (`crates/crane_term`) on top of `portable-pty`. Owns its own grid, scrollback, `?2026` synchronized-output replay, resize-aware reflow, wrap-aware copy, reverse-wraparound for `\b` / `CSI D`.
+  - **Terminal** *(beta)* — in-house VT parser (`crates/crane_term`) on top of `portable-pty`. Owns its own grid, scrollback, `?2026` synchronized-output replay, resize-aware reflow, wrap-aware copy, reverse-wraparound for `\b` / `CSI D`. 38 unit tests pin the VT behaviour. **Known issues:** hyperlink (OSC 8) rendering is incomplete; assorted micro-issues with edge-case escape sequences. Custom zsh prompts that compute cursor-back against UTF-8 byte width (Forge theme, older Powerlevel10k) misposition the cursor — this is the shell's bug, not Crane's, but it shows up here.
   - **Files** — editable tabbed editor with `syntect` highlighting (line-incremental cache so typing in a large file stays smooth), find/replace, read-only mode for files outside any workspace, native trash on delete, undo stack for file ops.
   - **Diff** — unified diff with hunk-level stage button, per-hunk jump nav, minimap scrollbar, syntax highlighting on both sides. Computation cached via `JobSystem` — re-rendering a 5k-line diff is a single `Arc::clone`.
   - **Markdown** — `pulldown-cmark` render with composite paragraphs (no inter-segment gaps), accent-tinted headings, code-fence styling.
-  - **Browser** — `wry`-backed embedded webview (macOS / Linux / Windows).
-  - **PDF** — `pdfium-render` viewer with text selection, page navigation, "Open Externally" handoff.
+  - **Browser** *(alpha)* — `wry`-backed embedded webview (macOS / Linux / Windows). **Known issues:** Cmd+A / Cmd+C / Cmd+V and similar editing shortcuts don't reach the webview's input fields; autocomplete / form-autofill is unreliable. Use sparingly until shortcut forwarding lands.
+  - **PDF** *(alpha)* — `pdfium-render` viewer with text selection, page navigation, "Open Externally" handoff. Complex / large PDFs may expose pdfium binding quirks.
+
+#### GPU terminal renderer *(alpha, env-gated)*
+
+> 🚧 **Off by default.** Set `CRANE_GPU_TERM=1` in the environment to enable an experimental wgpu render pass for the Terminal pane. The CPU/Painter path remains the default and is what the 38-test Terminal coverage exercises. The GPU path is a scaffold (commit `ec11985`); expect missing features and rendering glitches.
+
+#### LSP *(alpha)*
+
+> 🚧 **Servers run for the whole app session.** Per-language stdio multiplexer (`src/lsp/`). **Known issues:** `shutdown_disabled` only fires on a language toggle, never on idle — so once a server starts, it stays alive until you quit Crane, which can lead to fan-noise / RAM growth on long sessions with many languages opened. Completion / hover / goto-definition work but quality is uneven across servers; complex completions (snippets, signature help) are incomplete.
 
 ### Git
 - **Right Panel Changes** — staged / unstaged split, stage/unstage by file or hunk, commit (Cmd+Enter), push, pull, fetch.
