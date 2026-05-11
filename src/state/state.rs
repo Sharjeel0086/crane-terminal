@@ -819,7 +819,13 @@ impl App {
             && let Some(p) = self.projects.iter().find(|p| p.id == id)
             && !p.missing
         {
-            let _ = fw.watch_project(id, p.path.clone());
+            if let Err(e) = fw.watch_project(id, p.path.clone()) {
+                log::warn!(
+                    "FileWatcher: watch_project({}) failed: {e}; git status updates \
+                     for this project will rely on the interval poll fallback",
+                    p.path.display()
+                );
+            }
         }
         Some(id)
     }
@@ -1846,7 +1852,14 @@ impl App {
                     // watch_project directly.
                     for p in &self.projects {
                         if !p.missing {
-                            let _ = fw.watch_project(p.id, p.path.clone());
+                            if let Err(e) = fw.watch_project(p.id, p.path.clone()) {
+                                log::warn!(
+                                    "FileWatcher: watch_project({}) failed: {e}; \
+                                     git status updates for this project will rely \
+                                     on the interval poll fallback",
+                                    p.path.display()
+                                );
+                            }
                         }
                     }
                     self.file_watcher = Some(fw);
@@ -2292,8 +2305,21 @@ impl App {
         if let Some(fw) = self.file_watcher.as_ref() {
             fw.unwatch_project(pid);
         }
+        // Cancel every in-flight job under this project. Jobs are
+        // keyed at Workspace and Tab scope (not Project), so the
+        // Scope::Project cancel below is belt-and-braces for any
+        // future Project-scoped submissions; the workspace/tab
+        // loops are the ones that actually do the work today.
         if let Some(jobs) = self.jobs.as_ref() {
             jobs.cancel_scope(Scope::Project(pid));
+            if let Some(project) = self.projects.iter().find(|p| p.id == pid) {
+                for wt in &project.workspaces {
+                    jobs.cancel_scope(Scope::Workspace(wt.id));
+                    for tab in &wt.tabs {
+                        jobs.cancel_scope(Scope::Tab(tab.id));
+                    }
+                }
+            }
         }
         self.projects.retain(|p| p.id != pid);
         if let Some((p, _, _)) = self.active

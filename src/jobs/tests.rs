@@ -165,6 +165,56 @@ fn repaint_is_invoked_after_completion() {
 }
 
 #[test]
+fn worker_panic_does_not_kill_pool_and_cleans_registry() {
+    // Critical for production: a panicking job (syntect bug, git
+    // output unwrap, etc.) must not take down its worker — with
+    // CPU pool clamped to 1 on a 2-core machine, that's the whole
+    // pool. Additionally the registry entry must be released so
+    // future submits under the same key aren't immediately
+    // superseded by a phantom stale token.
+    let sys = JobSystem::with_sizes(1, 1, None);
+
+    // First: a job that panics.
+    let panic_handle = sys.submit::<i32, _>(
+        JobKey::new(Scope::Global, "panicker"),
+        Priority::Foreground,
+        Pool::Cpu,
+        |_tok| panic!("intentional test panic"),
+    );
+
+    // Consumer sees Disconnected (try_recv → None), not a hang.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !panic_handle.is_disconnected() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        panic_handle.is_disconnected(),
+        "panicked worker must close its sender so consumer doesn't poll forever"
+    );
+
+    // Registry must have released the panicked job's entry, otherwise
+    // live_count would be 1 here.
+    let live_after_panic = sys.live_count();
+    assert_eq!(
+        live_after_panic, 0,
+        "panicked job must clean its registry entry (live_count={live_after_panic})"
+    );
+
+    // Pool must still be alive — a second submit completes normally.
+    let ok_handle = sys.submit::<i32, _>(
+        JobKey::new(Scope::Global, "post_panic"),
+        Priority::Foreground,
+        Pool::Cpu,
+        |_tok| 99,
+    );
+    let out = drain(&ok_handle, Duration::from_secs(1)).expect("post-panic job result");
+    match out {
+        JobOutput::Done(v) => assert_eq!(v, 99),
+        JobOutput::Cancelled => panic!("post-panic job should run, not cancel"),
+    }
+}
+
+#[test]
 fn drop_cancels_in_flight_jobs_before_join() {
     // App-shutdown shape: a long-running job is in flight when the
     // JobSystem is dropped. The Drop impl must flip cancel tokens

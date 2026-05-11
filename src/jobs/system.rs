@@ -423,8 +423,38 @@ impl Drop for JobSystem {
     }
 }
 
-fn run_worker(pool: Arc<PoolState>, _registry: Arc<Mutex<Registry>>) {
+fn run_worker(pool: Arc<PoolState>, registry: Arc<Mutex<Registry>>) {
     while let Some(job) = pool.pop_blocking() {
-        (job.work)(&job.cancel);
+        // Catch unwinds so one panicking job doesn't take down the
+        // whole worker — on a 2-core machine with the CPU pool
+        // clamped to 1, an uncaught panic would kill the only CPU
+        // worker and every subsequent CPU job would queue forever.
+        let key = job.key.clone();
+        let cancel = job.cancel.clone();
+        let work = job.work;
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            work(&cancel);
+        }));
+        if let Err(payload) = res {
+            // The work closure normally calls registry.finish() and
+            // sends the result on tx. On panic neither ran, so the
+            // sender Drop will trigger a Disconnected on the
+            // consumer's try_recv and we must clean the registry
+            // ourselves — otherwise the JobKey leaks and every
+            // future submit under it sees a stale token.
+            registry.lock().finish(&key, &job.cancel);
+            let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            log::error!(
+                "crane-job worker caught panic in job {:?}/{}: {msg}",
+                key.scope,
+                key.kind
+            );
+        }
     }
 }
