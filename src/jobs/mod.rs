@@ -25,9 +25,17 @@ use std::sync::{Arc, OnceLock};
 static GLOBAL: OnceLock<Arc<JobSystem>> = OnceLock::new();
 
 /// Install the process-wide JobSystem. Called once by App on first
-/// init. Subsequent calls no-op (the first installation wins).
+/// init. Subsequent calls are a programming error: render code reads
+/// from the singleton, so swapping it would leave callers holding
+/// Arcs to a JobSystem that's about to be dropped. Logs a warning
+/// to make the misuse visible.
 pub fn install(jobs: Arc<JobSystem>) {
-    let _ = GLOBAL.set(jobs);
+    if GLOBAL.set(jobs).is_err() {
+        log::warn!(
+            "jobs::install called more than once; ignoring (first install wins). \
+             Render code already holds the original Arc<JobSystem>."
+        );
+    }
 }
 
 /// Read the process-wide JobSystem. None until `install` has been

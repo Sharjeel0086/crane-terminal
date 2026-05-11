@@ -103,9 +103,13 @@ impl DirCache {
         let arc = Arc::new(listing);
 
         let mut inner = self.inner.write();
-        // Drop oldest entries if we're over the cap. HashMap has no
-        // ordering, so we just evict arbitrary entries — bounding
-        // memory matters more than picking the optimal victim.
+        // Bound the map at MAX_ENTRIES. HashMap iteration order is
+        // unspecified, so victims are *arbitrary*, not LRU — under a
+        // pathological thrash pattern (user expanding 513+ unique
+        // dirs on consecutive frames) this could re-evict the
+        // hottest entry. In practice expanded-dir count is tens to
+        // low hundreds; the cap exists purely to prevent unbounded
+        // growth from a long session that explored a huge tree.
         if inner.map.len() >= MAX_ENTRIES {
             let drop_count = inner.map.len() - MAX_ENTRIES + 1;
             let keys: Vec<PathBuf> = inner.map.keys().take(drop_count).cloned().collect();

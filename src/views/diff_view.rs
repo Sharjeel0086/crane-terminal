@@ -217,19 +217,23 @@ pub fn render_diff_body(
     let job_ok = tab.compute_job.is_some() && tab.job_fingerprint == fingerprint;
 
     if !cached_ok && !job_ok && let Some(jobs) = crate::jobs::global() {
-        let key = JobKey::new(
-            Scope::Tab(0), // DiffTabData has no TabId; tag by left/right path hash
-            "diff_compute",
-        );
+        // Stable key per diff tab — hash of (left_path, right_path)
+        // identifies the tab uniquely without changing on every edit.
+        // The previous design used the input fingerprint as the key,
+        // which meant every edit created a new JobKey and dedup never
+        // fired — older in-flight jobs ran to completion and burned
+        // I/O-pool time on results no one would read.
+        // Stale results are now filtered via `job_fingerprint` instead.
+        let mut hasher = DefaultHasher::new();
+        tab.left_path.hash(&mut hasher);
+        tab.right_path.hash(&mut hasher);
+        let tab_key = hasher.finish();
         let left_text = tab.left_text.clone();
         let right_text = tab.right_text.clone();
         let repo_path = tab.repo_path.clone();
         let right_path = tab.right_path.clone();
         let handle = jobs.submit(
-            JobKey {
-                scope: Scope::Tab(fingerprint), // dedup per-tab via fingerprint reuse
-                kind: key.kind,
-            },
+            JobKey::new(Scope::Tab(tab_key), "diff_compute"),
             Priority::Foreground,
             Pool::Io,
             move |tok| compute_diff(left_text, right_text, repo_path, right_path, tok),

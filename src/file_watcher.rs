@@ -104,20 +104,52 @@ impl FileWatcher {
         self.out_rx.lock().take()
     }
 
-    /// Start watching a Project's root recursively. No-op on duplicate.
+    /// Start watching a Project's root recursively. If the project ID
+    /// is already watched at a different path, the old root is
+    /// replaced — handles "project moved on disk and re-added with
+    /// the same ID" without leaking the stale watcher.
     /// Canonicalizes the path so prefix routing matches the
     /// realpath-form notify reports (macOS reports /private/var/...
     /// for /var/... symlinks; identical issue on Linux with /tmp).
     pub fn watch_project(&self, project: ProjectId, root: PathBuf) -> std::io::Result<()> {
-        let canonical = std::fs::canonicalize(&root).unwrap_or(root);
-        {
+        let canonical = match std::fs::canonicalize(&root) {
+            Ok(c) => c,
+            Err(e) => {
+                // Falling back to the non-canonical path means macOS
+                // FSEvents may report /private/var/... while we route
+                // on /var/..., silently dropping every event. Loud
+                // log so the silent-failure mode is visible.
+                log::warn!(
+                    "FileWatcher: canonicalize({}) failed: {e}; events for project \
+                     {project} may be misrouted",
+                    root.display()
+                );
+                root.clone()
+            }
+        };
+        let prev_root: Option<PathBuf> = {
             let mut inner = self.inner.lock();
-            if inner.roots.values().any(|p| *p == project) {
+            let existing = inner
+                .roots
+                .iter()
+                .find(|(_, p)| **p == project)
+                .map(|(k, _)| k.clone());
+            if let Some(ref old) = existing
+                && old == &canonical
+            {
+                // Same path, same project — true no-op.
                 return Ok(());
             }
+            if let Some(ref old) = existing {
+                inner.roots.remove(old);
+            }
             inner.roots.insert(canonical.clone(), project);
-        }
+            existing
+        };
         if let Some(w) = self.watcher.lock().as_mut() {
+            if let Some(old) = prev_root.as_ref() {
+                let _ = w.unwatch(old);
+            }
             w.watch(&canonical, RecursiveMode::Recursive)
                 .map_err(notify_to_io)?;
         }

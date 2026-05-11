@@ -85,8 +85,30 @@ pub struct JobHandle<T> {
 }
 
 impl<T> JobHandle<T> {
+    /// Non-blocking result poll.
+    /// - `Some(Done)` / `Some(Cancelled)`: result is in; caller drops
+    ///   the handle.
+    /// - `None`: job is still running OR the worker panicked and the
+    ///   channel is disconnected. We collapse both because a polling
+    ///   consumer that already lost track of the handle can't act
+    ///   differently between "still running" and "lost". To detect a
+    ///   panic explicitly, check `is_disconnected()`.
     pub fn try_recv(&self) -> Option<JobOutput<T>> {
-        self.rx.try_recv().ok()
+        match self.rx.try_recv() {
+            Ok(out) => Some(out),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        }
+    }
+
+    /// True if the worker dropped the sender without delivering a
+    /// result (typically a panic). Callers can use this to break out
+    /// of a try_recv loop instead of spinning forever.
+    pub fn is_disconnected(&self) -> bool {
+        matches!(
+            self.rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        )
     }
 
     pub fn cancel_token(&self) -> CancelToken {
@@ -378,6 +400,20 @@ impl JobSystem {
 
 impl Drop for JobSystem {
     fn drop(&mut self) {
+        // Flip every live token before signaling pools so workers
+        // exit at their next checkpoint instead of finishing a
+        // long-running job (e.g. a 200 ms git status) — otherwise
+        // app shutdown hangs on whatever's mid-flight.
+        for k in self
+            .registry
+            .lock()
+            .live
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            k.cancel();
+        }
         self.cpu.shutdown();
         self.io.shutdown();
         let mut workers = self.workers.lock();

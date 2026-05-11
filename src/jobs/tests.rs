@@ -165,6 +165,102 @@ fn repaint_is_invoked_after_completion() {
 }
 
 #[test]
+fn drop_cancels_in_flight_jobs_before_join() {
+    // App-shutdown shape: a long-running job is in flight when the
+    // JobSystem is dropped. The Drop impl must flip cancel tokens
+    // *before* joining workers, else shutdown waits for the job to
+    // finish naturally.
+    let sys = JobSystem::with_sizes(1, 1, None);
+    let saw_cancel = Arc::new(AtomicUsize::new(0));
+    let saw_cancel_inner = Arc::clone(&saw_cancel);
+    let _h = sys.submit::<(), _>(
+        JobKey::new(Scope::Global, "long"),
+        Priority::Background,
+        Pool::Cpu,
+        move |tok| {
+            // Spin until cancelled. Without the Drop-cancel fix this
+            // would hang forever; with it, drop unblocks us within
+            // a few millis.
+            while !tok.is_cancelled() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            saw_cancel_inner.fetch_add(1, Ordering::Relaxed);
+        },
+    );
+
+    // Give the worker a moment to claim the job.
+    thread::sleep(Duration::from_millis(20));
+
+    // Drop the only Arc — Drop runs, cancels, joins. Bounded time.
+    let start = Instant::now();
+    let inner = Arc::try_unwrap(sys).unwrap_or_else(|_| panic!("only one Arc"));
+    drop(inner);
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        saw_cancel.load(Ordering::Relaxed),
+        1,
+        "worker must observe cancellation"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "Drop must not wait for natural completion (took {elapsed:?})"
+    );
+}
+
+#[test]
+fn rapid_submits_same_key_only_newest_wins() {
+    // Reviewer scenario: a tab edits rapidly, generating a burst of
+    // submits under the same key. The newest wins; earlier ones see
+    // their tokens flipped. Without stable keys, dedup never fires
+    // and the I/O pool burns cycles on results no one reads.
+    let sys = JobSystem::with_sizes(1, 1, None);
+    let key = JobKey::new(Scope::Tab(42), "compute");
+    let executed = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        let executed = Arc::clone(&executed);
+        let h = sys.submit::<usize, _>(
+            key.clone(),
+            Priority::Foreground,
+            Pool::Cpu,
+            move |tok| {
+                // Yield so the next submit can race.
+                thread::sleep(Duration::from_millis(5));
+                if tok.is_cancelled() {
+                    return i;
+                }
+                executed.fetch_add(1, Ordering::Relaxed);
+                i
+            },
+        );
+        handles.push(h);
+    }
+
+    // Earlier handles should have their tokens flipped by the time
+    // the last submit replaces the registry entry.
+    let last = handles.pop().unwrap();
+    for h in &handles {
+        assert!(
+            h.cancel_token().is_cancelled(),
+            "every superseded job's token must be cancelled"
+        );
+    }
+
+    let _ = drain(&last, Duration::from_secs(1));
+    // At least the last one ran; earlier ones may have run briefly
+    // before their token flipped (cooperative cancellation), but
+    // the harness above only burns 5 ms each — total executions
+    // should be small, not 5.
+    let ran = executed.load(Ordering::Relaxed);
+    assert!(
+        ran <= 2,
+        "dedup should keep executed count low under rapid resubmits (saw {ran})"
+    );
+}
+
+#[test]
 fn priority_higher_runs_first_when_workers_are_busy() {
     // Single CPU worker. Submit a Background job that holds the worker,
     // then enqueue a Foreground and a Background. Foreground must
