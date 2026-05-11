@@ -83,6 +83,30 @@ pub fn render(
     header_ui.set_clip_rect(header);
     header_ui.horizontal(|ui| {
         ui.add_space(8.0);
+        // Refs (left) panel toggle — pinned to the LEFT edge of the
+        // header so its screen position matches the panel it controls.
+        // Icon points in the direction the panel will move: when open
+        // it shows |← ("collapse to the left edge"); when collapsed it
+        // shows →| ("bring it back from the left"). Because the button
+        // is anchored on the left, the direction is never ambiguous
+        // against the right-side details toggle.
+        let refs_label = if state.col_refs_collapsed {
+            icons::ARROW_LINE_RIGHT
+        } else {
+            icons::ARROW_LINE_LEFT
+        };
+        if ui
+            .button(refs_label)
+            .on_hover_text(if state.col_refs_collapsed {
+                "Show refs panel"
+            } else {
+                "Hide refs panel"
+            })
+            .clicked()
+        {
+            state.col_refs_collapsed = !state.col_refs_collapsed;
+        }
+        ui.add_space(8.0);
         ui.label(egui::RichText::new("Git Log").strong());
         ui.add_space(8.0);
 
@@ -121,17 +145,12 @@ pub fn render(
                 request_close = true;
             }
             ui.add_space(4.0);
-            // Refs / Details collapse toggles. Order matters in this
-            // right_to_left layout — the first button rendered ends
-            // up RIGHTMOST. We want visual position to match panel
-            // side: details (right panel) toggle next to X on the
-            // right, refs (left panel) toggle to the left of that.
-            //
-            // Icons point in the direction the panel will move when
-            // clicked: ARROW_LINE_RIGHT on the details button means
-            // "click to collapse this panel to the right edge"; when
-            // collapsed it flips to ARROW_LINE_LEFT meaning "click
-            // to bring it back from the right".
+            // Details (right) panel toggle — pinned next to the X on
+            // the right edge. Icon shows the direction the panel will
+            // move: open → →| ("collapse to the right edge"),
+            // collapsed → ←| ("bring it back from the right"). The
+            // refs toggle lives on the LEFT side of the header so the
+            // two controls can never visually collide.
             let details_label = if state.col_details_collapsed {
                 icons::ARROW_LINE_LEFT
             } else {
@@ -147,23 +166,6 @@ pub fn render(
                 .clicked()
             {
                 state.col_details_collapsed = !state.col_details_collapsed;
-            }
-            ui.add_space(2.0);
-            let refs_label = if state.col_refs_collapsed {
-                icons::ARROW_LINE_RIGHT
-            } else {
-                icons::ARROW_LINE_LEFT
-            };
-            if ui
-                .button(refs_label)
-                .on_hover_text(if state.col_refs_collapsed {
-                    "Show refs panel"
-                } else {
-                    "Hide refs panel"
-                })
-                .clicked()
-            {
-                state.col_refs_collapsed = !state.col_refs_collapsed;
             }
             ui.add_space(4.0);
             if ui

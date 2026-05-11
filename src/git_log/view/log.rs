@@ -440,13 +440,20 @@ pub fn render(ui: &mut egui::Ui, state: &mut GitLogState) {
     let mut clicked_sha: Option<String> = None;
     let mut picked_op: Option<GitLogOp> = None;
 
-    // Keyboard nav: arrow keys move the selection through the
-    // currently visible (filtered) row list. Only fires when the log
-    // column has focus — we approximate that by checking that no
-    // egui widget currently holds keyboard focus (so Arrow keys
-    // don't fight the filter TextEdit).
+    // Keyboard nav: arrow keys / j / k move the selection through
+    // the currently visible (filtered) row list. Gated on TWO
+    // conditions:
+    //   1. The Git Log pane is the user's last-clicked surface
+    //      (`state.has_focus`). Without this, typing `j` in any
+    //      Terminal Pane bubbled up to here because terminals never
+    //      hold egui-level keyboard focus — they swallow keys in
+    //      their own input handler. Result: vim-style nav inside a
+    //      shell moved the commit selection.
+    //   2. No egui widget (e.g. the filter TextEdit) is currently
+    //      grabbing keystrokes, so j/k inside the filter don't
+    //      double as nav.
     let any_focus = ui.ctx().memory(|m| m.focused().is_some());
-    if !any_focus && !visible.is_empty() {
+    if state.has_focus && !any_focus && !visible.is_empty() {
         let cur_visible = state
             .selected_commit
             .as_ref()
