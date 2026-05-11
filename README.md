@@ -34,7 +34,11 @@ Grab the latest build for your platform from the [Releases](https://github.com/r
 
 ### Workspaces & projects
 - **Project → Workspace → Tab → Layout → Pane** hierarchy. Each Workspace is a git worktree (`git worktree add`) so branches are real filesystem checkouts, not virtual switches.
-- **Drag-drop reorder** for projects, workspaces, and tabs in the Left Panel.
+- **Drag-drop in the Left Panel (Projects tree)** to reorganize freely:
+  - Reorder **projects** up/down the list.
+  - Reorder **workspaces** within a project, or move them between projects of the same git remote.
+  - Reorder **tabs** within a workspace, or drag them into another workspace.
+  - Drop is scoped per "group block" so a nested-repo group's children can't escape the group accidentally; folder headers themselves are draggable.
 - **Loose-files projects** — folders that aren't a git repo surface their contents as a flat tree; nested `.git` roots auto-promote to sub-projects under a group header.
 - **Session restore** — projects, workspaces, tabs, layout splits, open files, panel widths, fonts, themes, ANSI/SGR terminal state all persist to `~/.crane/session.json` and reload exactly as left.
 - **Workspace lifecycle** — Cmd+Q confirmation, ghost-worktree pruning when the dir disappears outside Crane.
@@ -51,9 +55,19 @@ Grab the latest build for your platform from the [Releases](https://github.com/r
 
 ### Git
 - **Right Panel Changes** — staged / unstaged split, stage/unstage by file or hunk, commit (Cmd+Enter), push, pull, fetch.
-- **Git Log Pane** (`Cmd+9`) — DAG graph with lane-based layout, ref pills (HEAD / local branch / remote / tag), filter by subject/hash/author + by branch + by user, right-click menu (checkout / branch from / worktree from / cherry-pick / revert / copy hash), auto-refresh on `.git/refs/` changes via filesystem watcher.
 - **Branch picker** — click the branch chip in the status bar to switch / pick branches across all repos in the active workspace.
 - **External edits land instantly** — any file touched outside Crane (other editor, build script, sub-agent in a terminal pane) reflects in the Changes tab within ~50 ms.
+
+#### Git Log Pane — `Cmd+9` (alpha)
+
+> 🚧 **Alpha — may break, regress, or render incorrectly.** The DAG layout and `.git/refs/` watcher are new code paths; we ship them so the agent-driven workflow has a place to see history, but expect rough edges on edge cases (octopus merges, very deep histories, rebases-in-flight). File bugs with the offending repo's `git log --all --oneline --graph` output and a screenshot.
+
+- DAG graph with lane-based layout, branch-stable lane colors, merge-into-existing-lane termination so curves connect back to the branch origin instead of trailing off.
+- Ref pills inline on each row: green = HEAD, purple = local branch, blue = remote, yellow = tag.
+- Filter by subject / hash / author (typed) + by branch (combo) + by user (combo). Filter signature is cached so typing doesn't recompute lanes per keystroke.
+- Right-click commit row → Checkout · Create branch from here · Create worktree from here · Cherry-pick · Revert · Copy hash.
+- Auto-refresh on `.git/HEAD`, `.git/refs/`, `.git/packed-refs` writes (debounced 250 ms). 30 s poll backstop only fires when the watcher has been quiet — no per-tick `git log` re-shell.
+- Reload + fetch run on the JobSystem I/O pool; closing the pane cancels in-flight work.
 
 ### Performance & architecture
 - **No async runtime** — plain `std::thread` + `parking_lot` + `mpsc`. No Tokio.
