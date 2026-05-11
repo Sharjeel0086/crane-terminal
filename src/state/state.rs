@@ -258,20 +258,49 @@ impl GitOpKind {
 
 /// State of the most recent (or in-flight) async git op. Worker
 /// thread owns this via `Arc<Mutex<…>>` and the render loop polls.
+///
+/// Every non-Idle variant carries `repo` (the worktree path the op
+/// ran against) so the UI can filter by the active project. Without
+/// this scoping, a `Push failed: …` from project A would persist as
+/// a red pill when the user switches to project B — confusing, since
+/// the error has nothing to do with B's repo.
 #[derive(Clone, Debug)]
 pub enum GitOpStatus {
     /// No op has been run yet, or the last result was dismissed.
     Idle,
     /// An op is in flight — the UI shows a spinner on the matching
     /// button and disables the others.
-    Running(GitOpKind),
+    Running {
+        kind: GitOpKind,
+        repo: std::path::PathBuf,
+    },
     /// Last op succeeded; carries a short result message ("Pulled
     /// 3 commits", "Already up to date", "Pushed to origin/main")
     /// for the bottom pill. Auto-cleared when the user starts the
     /// next op.
-    Done { kind: GitOpKind, message: String },
+    Done {
+        kind: GitOpKind,
+        repo: std::path::PathBuf,
+        message: String,
+    },
     /// Last op failed; carries the stderr-derived error text.
-    Failed { kind: GitOpKind, error: String },
+    Failed {
+        kind: GitOpKind,
+        repo: std::path::PathBuf,
+        error: String,
+    },
+}
+
+impl GitOpStatus {
+    /// Returns the repo this status applies to, or None for Idle.
+    pub fn repo(&self) -> Option<&std::path::Path> {
+        match self {
+            GitOpStatus::Idle => None,
+            GitOpStatus::Running { repo, .. }
+            | GitOpStatus::Done { repo, .. }
+            | GitOpStatus::Failed { repo, .. } => Some(repo.as_path()),
+        }
+    }
 }
 
 impl Default for GitOpStatus {
@@ -1365,10 +1394,13 @@ impl App {
     ) {
         {
             let mut guard = self.git_op_status.lock();
-            if matches!(*guard, GitOpStatus::Running(_)) {
+            if matches!(*guard, GitOpStatus::Running { .. }) {
                 return;
             }
-            *guard = GitOpStatus::Running(kind);
+            *guard = GitOpStatus::Running {
+                kind,
+                repo: repo.clone(),
+            };
         }
 
         // Short-circuit pre-checks. Cheap (single git rev-list).
@@ -1381,6 +1413,7 @@ impl App {
                 if kind == GitOpKind::Push && ab.ahead == 0 {
                     *guard = GitOpStatus::Done {
                         kind,
+                        repo: repo.clone(),
                         message: if ab.behind > 0 {
                             format!("Nothing to push (behind {} — pull first)", ab.behind)
                         } else {
@@ -1393,6 +1426,7 @@ impl App {
                 if kind == GitOpKind::Pull && ab.behind == 0 {
                     *guard = GitOpStatus::Done {
                         kind,
+                        repo: repo.clone(),
                         message: "Already up to date".into(),
                     };
                     ctx.request_repaint();
@@ -1403,29 +1437,38 @@ impl App {
 
         let status = self.git_op_status.clone();
         let ctx2 = ctx.clone();
+        let repo_for_thread = repo.clone();
         std::thread::spawn(move || {
             let result: Result<String, String> = match kind {
                 GitOpKind::Commit => match commit_message.as_deref() {
                     Some(msg) if !msg.trim().is_empty() => {
-                        crate::git::commit(&repo, msg).map(|()| "Committed".to_string())
+                        crate::git::commit(&repo_for_thread, msg).map(|()| "Committed".to_string())
                     }
                     _ => Err("No commit message".into()),
                 },
                 GitOpKind::CommitAndPush => match commit_message.as_deref() {
-                    Some(msg) if !msg.trim().is_empty() => crate::git::commit(&repo, msg)
+                    Some(msg) if !msg.trim().is_empty() => crate::git::commit(&repo_for_thread, msg)
                         .map_err(|e| e)
-                        .and_then(|()| crate::git::push(&repo))
+                        .and_then(|()| crate::git::push(&repo_for_thread))
                         .map(|s| format!("Committed and pushed — {s}")),
                     _ => Err("No commit message".into()),
                 },
-                GitOpKind::Push => crate::git::push(&repo),
-                GitOpKind::Pull => crate::git::pull(&repo),
-                GitOpKind::Fetch => crate::git::fetch(&repo),
+                GitOpKind::Push => crate::git::push(&repo_for_thread),
+                GitOpKind::Pull => crate::git::pull(&repo_for_thread),
+                GitOpKind::Fetch => crate::git::fetch(&repo_for_thread),
             };
             let mut guard = status.lock();
             *guard = match result {
-                Ok(message) => GitOpStatus::Done { kind, message },
-                Err(error) => GitOpStatus::Failed { kind, error },
+                Ok(message) => GitOpStatus::Done {
+                    kind,
+                    repo: repo_for_thread,
+                    message,
+                },
+                Err(error) => GitOpStatus::Failed {
+                    kind,
+                    repo: repo_for_thread,
+                    error,
+                },
             };
             drop(guard);
             ctx2.request_repaint();

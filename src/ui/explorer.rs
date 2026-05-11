@@ -236,7 +236,15 @@ fn render_changes(ui: &mut egui::Ui, app: &mut App) {
     // flight (driven by `app.git_op_status`); other buttons
     // disable so a double-click can't queue a second op.
     let op_status = app.git_op_status.lock().clone();
-    let any_op_running = matches!(op_status, GitOpStatus::Running(_));
+    // Only treat the status as relevant to this view when it belongs
+    // to the currently-active repo. Otherwise a Push failure from
+    // project A keeps reading as "blocking" on project B.
+    let status_matches_repo = op_status
+        .repo()
+        .map(|p| p == repo_path.as_path())
+        .unwrap_or(false);
+    let any_op_running =
+        status_matches_repo && matches!(op_status, GitOpStatus::Running { .. });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(10.0);
@@ -264,9 +272,12 @@ fn render_changes(ui: &mut egui::Ui, app: &mut App) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(8.0);
-            let fetch_running = matches!(op_status, GitOpStatus::Running(GitOpKind::Fetch));
-            let push_running = matches!(op_status, GitOpStatus::Running(GitOpKind::Push));
-            let pull_running = matches!(op_status, GitOpStatus::Running(GitOpKind::Pull));
+            let fetch_running = status_matches_repo
+                && matches!(op_status, GitOpStatus::Running { kind: GitOpKind::Fetch, .. });
+            let push_running = status_matches_repo
+                && matches!(op_status, GitOpStatus::Running { kind: GitOpKind::Push, .. });
+            let pull_running = status_matches_repo
+                && matches!(op_status, GitOpStatus::Running { kind: GitOpKind::Pull, .. });
             // Render right-to-left so insertion order is reverse:
             // Fetch, Pull, Push (visually).
             if toolbar_button(
@@ -415,10 +426,14 @@ fn render_changes(ui: &mut egui::Ui, app: &mut App) {
 
     let mut action_commit = false;
 
-    let commit_running = matches!(
-        op_status,
-        GitOpStatus::Running(GitOpKind::Commit | GitOpKind::CommitAndPush)
-    );
+    let commit_running = status_matches_repo
+        && matches!(
+            op_status,
+            GitOpStatus::Running {
+                kind: GitOpKind::Commit | GitOpKind::CommitAndPush,
+                ..
+            }
+        );
     let commit_enabled = can_commit && !any_op_running;
     let commit_label = if commit_running {
         format!("{}  Committing…", icons::ARROW_COUNTER_CLOCKWISE)
@@ -466,42 +481,47 @@ fn render_changes(ui: &mut egui::Ui, app: &mut App) {
     // Status pill: shows in-flight op, last success, or error.
     // Wins over the legacy `git_error` pill since it carries the
     // op kind too (so users can tell if "auth failed" was Push or
-    // Pull).
-    match &op_status {
-        GitOpStatus::Idle => {
-            if let Some(err) = &app.git_error {
+    // Pull). Only renders when the status belongs to the active
+    // repo — otherwise a stale Push failure from one project would
+    // bleed into the footer of another.
+    if status_matches_repo {
+        match &op_status {
+            GitOpStatus::Idle => {}
+            GitOpStatus::Running { kind, .. } => {
                 footer_ui.add_space(6.0);
                 footer_ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(err).color(theme::current().diff_deleted()).size(11.0));
+                    ui.label(
+                        RichText::new(format!("{}…", kind.label()))
+                            .color(muted())
+                            .size(11.0)
+                            .italics(),
+                    );
                 });
             }
+            GitOpStatus::Done { kind, message, .. } => {
+                footer_ui.add_space(6.0);
+                footer_ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("{}: {}", kind.label(), message))
+                            .color(theme::current().diff_added())
+                            .size(11.0),
+                    );
+                });
+            }
+            GitOpStatus::Failed { kind, error, .. } => {
+                footer_ui.add_space(6.0);
+                render_op_error(&mut footer_ui, &repo_path, kind.label(), error);
+            }
         }
-        GitOpStatus::Running(kind) => {
+    } else if matches!(op_status, GitOpStatus::Idle) {
+        // Legacy stage/unstage error path — only shown when no async
+        // op pill is taking the slot, and (now) only for the active
+        // repo, since git_error is also a global field.
+        if let Some(err) = &app.git_error {
             footer_ui.add_space(6.0);
             footer_ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    RichText::new(format!("{}…", kind.label()))
-                        .color(muted())
-                        .size(11.0)
-                        .italics(),
-                );
-            });
-        }
-        GitOpStatus::Done { kind, message } => {
-            footer_ui.add_space(6.0);
-            footer_ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(format!("{}: {}", kind.label(), message))
-                        .color(theme::current().diff_added())
-                        .size(11.0),
-                );
-            });
-        }
-        GitOpStatus::Failed { kind, error } => {
-            footer_ui.add_space(6.0);
-            footer_ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(format!("{} failed: {}", kind.label(), error))
+                    RichText::new(err)
                         .color(theme::current().diff_deleted())
                         .size(11.0),
                 );
@@ -606,6 +626,88 @@ fn open_file_diff(app: &mut App, repo: &std::path::Path, rel_path: &str) {
             title,
             Some(repo.to_string_lossy().to_string()),
         );
+    }
+}
+
+/// Render a failed git-op pill with an expand toggle. Errors from
+/// `git push` / `pull` are often multi-line (remote rejection
+/// messages, hook output, etc.) — the collapsed view shows the first
+/// line so the footer stays compact; clicking the chevron reveals
+/// the full stderr in a monospace block. State is keyed by repo so
+/// each project remembers its own expanded/collapsed setting.
+fn render_op_error(
+    ui: &mut egui::Ui,
+    repo: &std::path::Path,
+    op_label: &str,
+    error: &str,
+) {
+    let err_color = theme::current().diff_deleted();
+    let id = egui::Id::new(("crane.git_op_error_expanded", repo));
+    let mut expanded = ui.ctx().data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+
+    // Snip the first non-empty line for the collapsed view; some git
+    // errors lead with a blank line or a "remote:" prefix.
+    let first_line = error
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    let multi_line = error.lines().filter(|l| !l.trim().is_empty()).count() > 1
+        || first_line.len() < error.trim().len();
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(
+            RichText::new(format!("{} failed:", op_label))
+                .color(err_color)
+                .size(11.0)
+                .strong(),
+        );
+        ui.label(
+            RichText::new(first_line)
+                .color(err_color)
+                .size(11.0),
+        );
+        if multi_line {
+            let chevron = if expanded {
+                icons::CARET_UP
+            } else {
+                icons::CARET_DOWN
+            };
+            let resp = ui.add(
+                egui::Button::new(
+                    RichText::new(chevron)
+                        .color(muted())
+                        .size(11.0),
+                )
+                .frame(false)
+                .min_size(egui::vec2(16.0, 16.0)),
+            );
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                expanded = !expanded;
+                ui.ctx().data_mut(|d| d.insert_temp(id, expanded));
+            }
+        }
+    });
+
+    if multi_line && expanded {
+        ui.add_space(2.0);
+        let frame_fill = ui.visuals().extreme_bg_color;
+        egui::Frame::NONE
+            .fill(frame_fill)
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .corner_radius(egui::CornerRadius::same(4))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(error.trim())
+                        .color(err_color)
+                        .size(10.5)
+                        .monospace(),
+                );
+            });
     }
 }
 
