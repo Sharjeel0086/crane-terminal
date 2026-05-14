@@ -259,4 +259,81 @@ mod tests {
         proc_.parse_bytes(&mut term, b" more\x1b[?2026l");
         assert!(!proc_.sync_active());
     }
+
+    /// Ink (and other React-for-CLI frameworks) wraps each render
+    /// pass in `?2026h ... ?2026l`. If a static log line (`✔ Built`
+    /// style) was emitted in a *previous* frame and then scrolls
+    /// off the top because the dynamic UI in the *current* frame
+    /// grew, that row must end up in scrollback — losing it makes
+    /// committed messages silently vanish from the user's view.
+    ///
+    /// Pre-gen-tagging, the in-sync eviction was unconditionally
+    /// dropped (to defeat the duplicate-splash artifact), so this
+    /// test would have failed. With the per-row sync-gen tag, the
+    /// evicted row's gen (from the pre-sync frame) differs from
+    /// the live sync gen, so it survives.
+    #[test]
+    fn ink_pre_sync_row_scrolling_off_inside_sync_reaches_scrollback() {
+        let mut term = Term::new(5, 10);
+        let mut proc_ = Processor::new();
+        // Fill the screen with five lines from outside any sync
+        // block. Cursor lands at end of "L4" on row 4 (bottom).
+        proc_.parse_bytes(&mut term, b"L0\r\nL1\r\nL2\r\nL3\r\nL4");
+        assert_eq!(term.scrollback.len(), 0, "baseline: no scrollback yet");
+
+        // Now an Ink-style render: open sync, emit a single new
+        // line which forces the topmost row ("L0", written before
+        // the sync) to scroll off, then close sync.
+        proc_.parse_bytes(
+            &mut term,
+            b"\x1b[?2026h\r\nNEW\x1b[?2026l",
+        );
+
+        assert_eq!(
+            term.scrollback.len(),
+            1,
+            "the pre-sync row that scrolled off must be in scrollback, \
+             not dropped on the floor"
+        );
+        let evicted_row = term.scrollback.iter().next().expect("one row");
+        let evicted: String = evicted_row
+            .cells
+            .iter()
+            .take(2)
+            .map(|c| c.ch)
+            .collect();
+        assert_eq!(evicted, "L0", "the scrolled row should be L0");
+    }
+
+    /// Sanity check that the gen-tagging didn't accidentally
+    /// regress the splash-dup fix: a redraw that overwrites the
+    /// same visible rows inside a sync block must still NOT push
+    /// duplicate rows into scrollback. This is the original
+    /// `sync_block_landing_at_screen_bottom_does_not_evict` test
+    /// pattern restated with explicit pre-sync content.
+    #[test]
+    fn sync_block_overwriting_existing_rows_still_does_not_pollute_scrollback() {
+        let mut term = Term::new(5, 10);
+        let mut proc_ = Processor::new();
+        proc_.parse_bytes(&mut term, b"r0\r\nr1\r\nr2\r\nr3\r\nr4");
+        let before = term.scrollback.len();
+
+        // Cursor-up to top, then redraw five new lines. Each LF
+        // mutates a row that was visible before the sync — so its
+        // gen flips to current, and the eviction at the last LF
+        // is dropped (intermediate redraw state, not pre-sync
+        // history).
+        proc_.parse_bytes(
+            &mut term,
+            b"\x1b[?2026h\x1b[5A\
+              R0\nR1\nR2\nR3\nR4\
+              \x1b[?2026l",
+        );
+
+        assert_eq!(
+            term.scrollback.len(),
+            before,
+            "redraw of existing rows must not duplicate them into scrollback"
+        );
+    }
 }

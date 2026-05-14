@@ -21,6 +21,21 @@ pub struct Term {
     /// scroll routing does not branch on this; the cursor-position
     /// check in [`Term::linefeed`] is what gates scrollback writes.
     pub in_sync_frame: bool,
+    /// Monotonic counter incremented every time the processor enters
+    /// a sync frame (`set_sync_frame(true)`). Every row write tags
+    /// the row with this value via [`Row::touched_at`]; the eviction
+    /// path in [`Term::scroll_up_one`] then compares the evicted
+    /// row's gen against the live value:
+    /// * equal  → row was mutated inside the current sync frame, so
+    ///   it's intermediate redraw state — drop it (preserves the
+    ///   duplicate-splash fix for Claude Code / opencode).
+    /// * differ → row predates this sync frame, so it's real
+    ///   history that the dynamic UI happened to scroll past — push
+    ///   to scrollback (fixes Ink static-line loss).
+    /// Starts at 1 so the default `written_in_gen == 0` on a fresh
+    /// `Row::new` reliably compares unequal until something writes
+    /// during the first sync frame.
+    pub current_sync_gen: u64,
     /// Bumped on every grid / scrollback mutation. Crane's PTY
     /// reader thread reads this after each parse pass and only
     /// requests a repaint when it actually changed — avoids the
@@ -45,6 +60,7 @@ impl Term {
             scrollback: Scrollback::default(),
             mode: TermMode::default(),
             in_sync_frame: false,
+            current_sync_gen: 1,
             dirty_epoch: 0,
             saved_cursor: None,
             selection: None,
@@ -425,15 +441,17 @@ impl Term {
     /// [`Term::linefeed`] when the cursor sits at scroll-region
     /// bottom — that's the single chokepoint for scrollback writes.
     ///
-    /// **Sync-frame guard**: when `in_sync_frame` is true, the
-    /// evicted row is dropped instead of preserved. Inside a
-    /// `?2026h ... ?2026l` block, a TUI is repainting its own
-    /// region; the rows that fall off the top during the replay
-    /// are intermediate state, not real history. Without this
-    /// guard, every Ink-style redraw whose last LF lands at the
-    /// screen bottom pushes one duplicate row into scrollback —
-    /// the exact "duplicate Claude Code splash" artifact tracked
-    /// in CLAUDE.md.
+    /// **Sync-frame gate**: inside a `?2026h ... ?2026l` block, an
+    /// evicted row is preserved only when it pre-dates the current
+    /// sync (`written_in_gen != current_sync_gen`). The previous
+    /// implementation suppressed *every* eviction inside sync,
+    /// which fixed Claude Code's "duplicate splash" artifact at the
+    /// cost of dropping legitimate Ink static-log lines that
+    /// happened to scroll off the top inside the same sync block.
+    /// The gen-tagged check keeps both: redraw-of-same-content
+    /// (Claude splash) is mutated by the redraw → equal gen → drop;
+    /// static line from a previous frame scrolling off (Ink) →
+    /// untouched this sync → unequal gen → keep.
     fn scroll_up_one(&mut self) {
         let region = self.grid.scroll_region.clone();
         if region.is_empty() {
@@ -443,15 +461,20 @@ impl Term {
             &mut self.grid.rows[region.start],
             Row::new(self.grid.columns, &self.grid.cursor.template),
         );
-        if !self.mode.contains(TermMode::ALT_SCREEN) && !self.in_sync_frame {
-            self.scrollback.push(evicted);
+        if !self.mode.contains(TermMode::ALT_SCREEN) {
+            let preserve = !self.in_sync_frame
+                || evicted.written_in_gen != self.current_sync_gen;
+            if preserve {
+                self.scrollback.push(evicted);
+            }
         }
         for r in region.start..region.end.saturating_sub(1) {
             self.grid.rows.swap(r, r + 1);
         }
         let bottom = region.end.saturating_sub(1);
+        let sync_gen = self.current_sync_gen;
         if let Some(row) = self.grid.rows.get_mut(bottom) {
-            row.reset(&self.grid.cursor.template);
+            row.reset_at(&self.grid.cursor.template, sync_gen);
         }
     }
 
@@ -465,16 +488,17 @@ impl Term {
             return;
         }
         let bottom = region.end.saturating_sub(1);
+        let sync_gen = self.current_sync_gen;
         // Reset the bottom row first so the swap chain doesn't
         // carry its previous content upward.
         if let Some(row) = self.grid.rows.get_mut(bottom) {
-            row.reset(&self.grid.cursor.template);
+            row.reset_at(&self.grid.cursor.template, sync_gen);
         }
         for r in (region.start + 1..region.end).rev() {
             self.grid.rows.swap(r, r - 1);
         }
         if let Some(row) = self.grid.rows.get_mut(region.start) {
-            row.reset(&self.grid.cursor.template);
+            row.reset_at(&self.grid.cursor.template, sync_gen);
         }
     }
 
@@ -532,6 +556,7 @@ impl Term {
         let row_idx = self.grid.cursor.row.min(self.grid.rows.len() - 1);
         let col = self.grid.cursor.col.min(self.grid.columns - 1);
         let template = self.grid.cursor.template.clone();
+        let sync_gen = self.current_sync_gen;
         let row = match self.grid.rows.get_mut(row_idx) {
             Some(r) => r,
             None => return,
@@ -541,19 +566,19 @@ impl Term {
                 for c in row.cells.iter_mut().skip(col) {
                     *c = template.clone();
                 }
-                row.mark_touched(self.grid.columns.saturating_sub(1));
+                row.touched_at(self.grid.columns.saturating_sub(1), sync_gen);
             }
             LineClearMode::Left => {
                 for c in row.cells.iter_mut().take(col + 1) {
                     *c = template.clone();
                 }
-                row.mark_touched(col);
+                row.touched_at(col, sync_gen);
             }
             LineClearMode::All => {
                 for c in row.cells.iter_mut() {
                     *c = template.clone();
                 }
-                row.mark_touched(self.grid.columns.saturating_sub(1));
+                row.touched_at(self.grid.columns.saturating_sub(1), sync_gen);
             }
         }
     }
@@ -598,6 +623,7 @@ impl Handler for Term {
 
     fn input(&mut self, c: char) {
         use unicode_width::UnicodeWidthChar;
+        let sync_gen = self.current_sync_gen;
         // Width 0: zero-width / combining mark. Stack onto the
         // previous cell instead of advancing the cursor.
         let width = UnicodeWidthChar::width(c).unwrap_or(1);
@@ -613,7 +639,7 @@ impl Handler for Term {
                 if let Some(cell) = row.cells.get_mut(col) {
                     cell.push_zero_width(c);
                 }
-                row.mark_touched(col);
+                row.touched_at(col, sync_gen);
             }
             self.mark_dirty();
             return;
@@ -637,6 +663,10 @@ impl Handler for Term {
                 if let Some(last) = row.cells.last_mut() {
                     last.flags.insert(Flags::WRAPLINE);
                 }
+                // Setting the WRAPLINE flag is a row mutation;
+                // bump the gen so this row is recognised as
+                // "touched this sync" by `scroll_up_one`.
+                row.written_in_gen = sync_gen;
             }
             self.carriage_return();
             let _ = self.linefeed();
@@ -665,6 +695,7 @@ impl Handler for Term {
                         cell.flags = template.flags;
                         cell.extra = None;
                     }
+                    row.touched_at(self.grid.columns - 1, sync_gen);
                 }
                 self.grid.cursor.input_needs_wrap = true;
                 self.mark_dirty();
@@ -694,9 +725,9 @@ impl Handler for Term {
                     spacer.flags.insert(Flags::WIDE_CHAR_SPACER);
                     spacer.extra = None;
                 }
-                row.mark_touched(col_idx + 1);
+                row.touched_at(col_idx + 1, sync_gen);
             } else {
-                row.mark_touched(col_idx);
+                row.touched_at(col_idx, sync_gen);
             }
         }
         let advance = if is_wide { 2 } else { 1 };
@@ -838,6 +869,7 @@ impl Handler for Term {
         let row_idx = self.grid.cursor.row.min(self.grid.rows.len() - 1);
         let col = self.grid.cursor.col.min(self.grid.columns - 1);
         let template = self.grid.cursor.template.clone();
+        let sync_gen = self.current_sync_gen;
         if let Some(row) = self.grid.rows.get_mut(row_idx) {
             // Shift cells right of cursor by `n`, dropping the
             // overflow off the right edge. Then fill the gap with
@@ -849,7 +881,7 @@ impl Handler for Term {
             for c in col..(col + n).min(cols) {
                 row.cells[c] = template.clone();
             }
-            row.mark_touched(cols.saturating_sub(1));
+            row.touched_at(cols.saturating_sub(1), sync_gen);
         }
         self.mark_dirty();
     }
@@ -860,11 +892,12 @@ impl Handler for Term {
         let col = self.grid.cursor.col.min(self.grid.columns - 1);
         let cols = self.grid.columns;
         let template = self.grid.cursor.template.clone();
+        let sync_gen = self.current_sync_gen;
         if let Some(row) = self.grid.rows.get_mut(row_idx) {
             for c in col..(col + n).min(cols) {
                 row.cells[c] = template.clone();
             }
-            row.mark_touched((col + n).min(cols).saturating_sub(1));
+            row.touched_at((col + n).min(cols).saturating_sub(1), sync_gen);
         }
         self.mark_dirty();
     }
@@ -875,6 +908,7 @@ impl Handler for Term {
         let col = self.grid.cursor.col.min(self.grid.columns - 1);
         let cols = self.grid.columns;
         let template = self.grid.cursor.template.clone();
+        let sync_gen = self.current_sync_gen;
         if let Some(row) = self.grid.rows.get_mut(row_idx) {
             for c in col..cols.saturating_sub(n) {
                 row.cells[c] = row.cells[c + n].clone();
@@ -882,7 +916,7 @@ impl Handler for Term {
             for c in cols.saturating_sub(n)..cols {
                 row.cells[c] = template.clone();
             }
-            row.mark_touched(cols.saturating_sub(1));
+            row.touched_at(cols.saturating_sub(1), sync_gen);
         }
         self.mark_dirty();
     }
@@ -899,13 +933,14 @@ impl Handler for Term {
         let cursor_row = self.grid.cursor.row;
         let n = n.min(region.end - cursor_row);
         let template = self.grid.cursor.template.clone();
+        let sync_gen = self.current_sync_gen;
         // Bubble blank rows down: walk from bottom, swapping.
         for _ in 0..n {
             for r in (cursor_row + 1..region.end).rev() {
                 self.grid.rows.swap(r, r - 1);
             }
             if let Some(row) = self.grid.rows.get_mut(cursor_row) {
-                row.reset(&template);
+                row.reset_at(&template, sync_gen);
             }
         }
         self.mark_dirty();
@@ -924,12 +959,13 @@ impl Handler for Term {
         let cursor_row = self.grid.cursor.row;
         let n = n.min(region.end - cursor_row);
         let template = self.grid.cursor.template.clone();
+        let sync_gen = self.current_sync_gen;
         for _ in 0..n {
             for r in cursor_row..region.end.saturating_sub(1) {
                 self.grid.rows.swap(r, r + 1);
             }
             if let Some(row) = self.grid.rows.get_mut(region.end - 1) {
-                row.reset(&template);
+                row.reset_at(&template, sync_gen);
             }
         }
         self.mark_dirty();
@@ -946,6 +982,7 @@ impl Handler for Term {
         let template = self.grid.cursor.template.clone();
         let row_idx = self.grid.cursor.row.min(self.grid.rows.len() - 1);
         let col = self.grid.cursor.col.min(self.grid.columns - 1);
+        let sync_gen = self.current_sync_gen;
         match mode {
             ClearMode::Below => {
                 // Cursor row: clear from cursor to right margin.
@@ -953,27 +990,27 @@ impl Handler for Term {
                     for c in col..self.grid.columns {
                         row.cells[c] = template.clone();
                     }
-                    row.mark_touched(self.grid.columns - 1);
+                    row.touched_at(self.grid.columns - 1, sync_gen);
                 }
                 // Rows below cursor: full reset.
                 for r in (row_idx + 1)..self.grid.rows.len() {
-                    self.grid.rows[r].reset(&template);
+                    self.grid.rows[r].reset_at(&template, sync_gen);
                 }
             }
             ClearMode::Above => {
                 for r in 0..row_idx {
-                    self.grid.rows[r].reset(&template);
+                    self.grid.rows[r].reset_at(&template, sync_gen);
                 }
                 if let Some(row) = self.grid.rows.get_mut(row_idx) {
                     for c in 0..=col {
                         row.cells[c] = template.clone();
                     }
-                    row.mark_touched(col);
+                    row.touched_at(col, sync_gen);
                 }
             }
             ClearMode::All => {
                 for r in self.grid.rows.iter_mut() {
-                    r.reset(&template);
+                    r.reset_at(&template, sync_gen);
                 }
             }
             ClearMode::Saved => {
@@ -1123,6 +1160,13 @@ impl Handler for Term {
     }
 
     fn set_sync_frame(&mut self, active: bool) {
+        if active && !self.in_sync_frame {
+            // Bump the gen on every rising edge so any row touched
+            // during this sync frame is distinguishable from rows
+            // that pre-date it. `scroll_up_one` reads this in the
+            // eviction-vs-scrollback decision.
+            self.current_sync_gen = self.current_sync_gen.wrapping_add(1);
+        }
         self.in_sync_frame = active;
     }
 
