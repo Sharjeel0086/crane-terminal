@@ -423,8 +423,14 @@ impl eframe::App for CraneApp {
         // server process now instead of waiting for app exit. Cheap no-op
         // when every running server is still enabled.
         self.app.lsp.shutdown_disabled(&self.app.language_configs);
+        // Gate the browser-host pump on "at least one webview slot
+        // actually exists". Without this the `ps -axo` memory poll
+        // (every 3 s) and several `parking_lot::Mutex` locks per
+        // paint run for the full app lifetime — visible as a chronic
+        // ~3 s heartbeat in Activity Monitor's Energy column even
+        // when no Browser Pane has ever been opened.
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-        {
+        if !self.browser_host.is_idle() {
             // Fold any URL changes the webview reported (redirects,
             // link clicks, history manipulation) back into each tab's
             // state so the URL bar tracks in-page navigation.

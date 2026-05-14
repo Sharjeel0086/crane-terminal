@@ -210,6 +210,15 @@ impl BrowserHost {
         }
     }
 
+    /// True when no Browser Pane has materialised any webview yet.
+    /// `main.rs` uses this to short-circuit the per-frame browser pump
+    /// (memory poll, loading snapshot, URL drain) — without the gate
+    /// we'd shell out to `ps` every 3 s and lock several mutexes per
+    /// paint even with no Browser Pane open in any Tab.
+    pub fn is_idle(&self) -> bool {
+        self.slots.is_empty()
+    }
+
     /// Snapshot the set of keys whose webviews are currently loading.
     /// Cheap — egui view calls this once per frame.
     pub fn loading_set(&self) -> HashSet<SlotKey> {
