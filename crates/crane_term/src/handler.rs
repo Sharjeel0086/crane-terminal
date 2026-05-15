@@ -119,6 +119,21 @@ pub trait Handler {
     fn set_title(&mut self, title: Option<String>) {}
     fn bell(&mut self) {}
 
+    // ---- desktop notifications (OSC 9 / OSC 777) ----
+
+    /// Out-of-band notification emitted by a program running in the
+    /// PTY — for example a CLI agent (Claude Code, Codex) that fires a
+    /// `Stop` / `Notification` hook by writing `\e]9;<body>\a` to its
+    /// controlling terminal. iTerm2 / Terminal.app surface these as
+    /// macOS Notification Center banners; in Crane they're routed to
+    /// the App's toast queue.
+    ///
+    /// `body` is the raw OSC payload after the `9;` / `777;notify;`
+    /// prefix has been stripped, decoded as UTF-8 lossily. `urgent`
+    /// is `true` for OSC 777 ("urgency=critical"-style senders) and
+    /// `false` for plain OSC 9.
+    fn osc_notification(&mut self, _body: &str, _urgent: bool) {}
+
     // ---- queries the parser asks us to answer back to the PTY ----
 
     /// CSI Ps n. The implementation should push the appropriate

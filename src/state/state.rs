@@ -1,12 +1,29 @@
 use crate::file_watcher::{ChangeEvent, FileWatcher};
 use crate::git::{self, GitStatus};
 use crate::jobs::{JobHandle, JobKey, JobOutput, JobSystem, Pool, Priority, Scope};
-use crate::state::layout::Layout;
+use crate::state::layout::{Layout, PaneContent};
 use crate::update::check::UpdateCheck;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Toast-worthy event captured from an OSC 9 / OSC 777 notification a
+/// program in a Crane terminal emitted. Carries the locator quad so a
+/// click on the toast can jump focus to the originating Pane / Tab.
+#[derive(Debug, Clone)]
+pub struct PaneNotification {
+    pub body: String,
+    pub urgent: bool,
+    pub project: ProjectId,
+    pub workspace: WorkspaceId,
+    pub tab: TabId,
+    pub pane: u64,
+    /// Index into [`crate::state::layout::TerminalPane::tabs`] — the
+    /// inner terminal tab that produced the event.
+    pub term_tab: usize,
+    pub created_at: Instant,
+}
 
 fn shellexpand_home(s: &str) -> String {
     if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\"))
@@ -575,6 +592,25 @@ pub struct App {
     /// interval poll. The interval poll remains as a safety net.
     pub file_watcher: Option<FileWatcher>,
     pub fs_events: Option<std::sync::mpsc::Receiver<ChangeEvent>>,
+    /// FIFO of pending desktop notifications drained from the
+    /// terminal Panes each frame. The toast renderer pops the front
+    /// entry, displays it with a TTL, and drops it. Bounded to 64 —
+    /// if a script floods OSC 9 we drop oldest, never grow unbounded.
+    pub pending_notifications: VecDeque<PaneNotification>,
+    /// Currently-displayed toast (front of the queue, latched once so
+    /// the UI is stable across frames). `None` while no toast is
+    /// visible. Auto-clears when the TTL elapses or the user
+    /// dismisses it.
+    pub active_notification: Option<PaneNotification>,
+    /// Whether Crane's window currently has OS focus. Used to gate
+    /// the macOS Notification Center fallback so we don't double-
+    /// notify when the user is already looking at the app.
+    pub window_focused: bool,
+    /// Timestamp of the last CLI-agent detection sweep. Throttled to
+    /// 1 Hz because the probe shells out to `ps` per terminal — fine
+    /// once a second, wasteful every frame. `None` = never polled.
+    /// See [`App::poll_cli_agent_sessions`].
+    pub last_cli_agent_poll: Option<Instant>,
     next_project: ProjectId,
     next_workspace: WorkspaceId,
     next_tab: TabId,
@@ -637,10 +673,134 @@ impl App {
             jobs: None,
             file_watcher: None,
             fs_events: None,
+            pending_notifications: VecDeque::new(),
+            active_notification: None,
+            window_focused: true,
+            last_cli_agent_poll: None,
             next_project: 1,
             next_workspace: 1,
             next_tab: 1,
         }
+    }
+
+    /// Walk every live terminal in every Project / Workspace / Tab /
+    /// Pane and drain queued [`crane_term::TermNotification`]s into
+    /// [`App::pending_notifications`]. Cheap when nothing is queued
+    /// (single mutex acquire per terminal, immediate take of an
+    /// empty Vec). Called once per render frame from `main.rs`.
+    pub fn drain_terminal_notifications(&mut self) {
+        const MAX_QUEUE: usize = 64;
+        for project in &mut self.projects {
+            let pid = project.id;
+            for workspace in &mut project.workspaces {
+                let wid = workspace.id;
+                for tab in &mut workspace.tabs {
+                    let tid = tab.id;
+                    for (pane_id, pane) in tab.layout.panes.iter_mut() {
+                        let PaneContent::Terminal(tp) = &mut pane.content else {
+                            continue;
+                        };
+                        for (idx, tk) in tp.tabs.iter_mut().enumerate() {
+                            let events = tk.terminal.term.lock().take_notifications();
+                            for ev in events {
+                                if self.pending_notifications.len() >= MAX_QUEUE {
+                                    self.pending_notifications.pop_front();
+                                }
+                                self.pending_notifications.push_back(PaneNotification {
+                                    body: ev.body,
+                                    urgent: ev.urgent,
+                                    project: pid,
+                                    workspace: wid,
+                                    tab: tid,
+                                    pane: *pane_id,
+                                    term_tab: idx,
+                                    created_at: Instant::now(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 1 Hz sweep: detect whether any live terminal has a known CLI
+    /// agent (Claude Code, Codex, aider, …) as its foreground process
+    /// and flip the underlying [`crane_term::Term`] into
+    /// `FullGridClearBehavior::Clear` so pane resizes don't pile the
+    /// pre-resize frame into scrollback. One-way: once enabled on a
+    /// Term, it stays on for that Term's life (matches Warp's
+    /// design — agents do not typically exit and "return to
+    /// scrollback mode" inside the same pane).
+    ///
+    /// Cost per sweep: one cheap `tcgetpgrp` per terminal that has a
+    /// shell. Only the terminals where a foreground process is
+    /// detected and the flag isn't already set incur the
+    /// `ps -o comm=` fork. Capped to 1 Hz overall.
+    pub fn poll_cli_agent_sessions(&mut self) {
+        let now = Instant::now();
+        if let Some(prev) = self.last_cli_agent_poll
+            && now.duration_since(prev) < Duration::from_millis(900)
+        {
+            return;
+        }
+        self.last_cli_agent_poll = Some(now);
+
+        for project in &mut self.projects {
+            for workspace in &mut project.workspaces {
+                for tab in &mut workspace.tabs {
+                    for pane in tab.layout.panes.values_mut() {
+                        let PaneContent::Terminal(tp) = &mut pane.content else {
+                            continue;
+                        };
+                        for tk in tp.tabs.iter_mut() {
+                            // Skip Terms that already have the flag —
+                            // avoids the ps fork on every poll once a
+                            // session is identified.
+                            if tk.terminal.term.lock().is_full_grid_clear_behavior_enabled() {
+                                continue;
+                            }
+                            if tk.terminal.foreground_is_cli_agent() {
+                                tk.terminal
+                                    .term
+                                    .lock()
+                                    .enable_full_grid_clear_behavior();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Focus the Pane that emitted [`PaneNotification`] `n`. Called
+    /// when the user clicks a notification toast. Switches the active
+    /// Tab to `n.tab`, focuses Pane `n.pane`, and (if the originating
+    /// terminal Pane has multiple inner terminal tabs) selects
+    /// `n.term_tab`. No-op if the locators went stale (Tab closed,
+    /// Pane removed) — silent because the toast already conveyed the
+    /// signal.
+    pub fn focus_notification_source(&mut self, n: &PaneNotification) {
+        let Some(project) = self.projects.iter_mut().find(|p| p.id == n.project) else {
+            return;
+        };
+        let Some(workspace) = project.workspaces.iter_mut().find(|w| w.id == n.workspace) else {
+            return;
+        };
+        let Some(tab) = workspace.tabs.iter_mut().find(|t| t.id == n.tab) else {
+            return;
+        };
+        if !tab.layout.panes.contains_key(&n.pane) {
+            return;
+        }
+        tab.layout.focus = Some(n.pane);
+        if let Some(pane) = tab.layout.panes.get_mut(&n.pane)
+            && let PaneContent::Terminal(tp) = &mut pane.content
+            && n.term_tab < tp.tabs.len()
+        {
+            tp.active = n.term_tab;
+        }
+        self.active = Some((n.project, n.workspace, n.tab));
     }
 
     pub fn ensure_initial(&mut self, _ctx: &egui::Context) {

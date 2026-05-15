@@ -9,8 +9,9 @@
 //! stuck.
 
 use crate::handler::{Handler, ProcessorInput};
-use crate::perform::Bridge;
+use crate::perform::{Bridge, OscWatcher};
 use crate::sync::{SyncBuffer, SyncPushOutcome};
+use vte::Parser as VteRawParser;
 use vte::ansi::Processor as VteProcessor;
 
 const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
@@ -18,6 +19,13 @@ const SYNC_END: &[u8] = b"\x1b[?2026l";
 
 pub struct Processor {
     parser: VteProcessor,
+    /// Secondary low-level parser run in lockstep with `parser`. Its
+    /// sole job is to surface OSC 9 / OSC 777 to the Handler — vte's
+    /// `ansi::Handler` trait has no callback for those, and we don't
+    /// want to fork/reimplement the high-level parser just to add one
+    /// dispatch arm. Cost: re-running the byte-level state machine
+    /// once more per chunk. Negligible vs. PTY I/O.
+    osc_parser: VteRawParser,
     sync: SyncBuffer,
 }
 
@@ -31,6 +39,7 @@ impl Processor {
     pub fn new() -> Self {
         Self {
             parser: VteProcessor::new(),
+            osc_parser: VteRawParser::new(),
             sync: SyncBuffer::default(),
         }
     }
@@ -104,6 +113,16 @@ impl Processor {
     where
         H: Handler,
     {
+        // OSC watcher runs first so a `Handler::osc_notification` call
+        // arrives before any grid mutations from the same chunk. Order
+        // doesn't matter for correctness (the two parsers are
+        // independent state machines), but it makes traces easier to
+        // read: notification first, then "we drew the row that mentions
+        // it" second.
+        {
+            let mut osc = OscWatcher { inner: handler };
+            self.osc_parser.advance(&mut osc, chunk);
+        }
         let mut bridge = Bridge { inner: handler };
         self.parser.advance(&mut bridge, chunk);
     }

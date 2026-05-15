@@ -388,6 +388,58 @@ impl Terminal {
         false
     }
 
+    /// Command name of the PTY's foreground process group (typically
+    /// the binary the user is running — `claude`, `vim`, `cargo`, …),
+    /// or `None` if the shell itself is in foreground or the lookup
+    /// fails. Shells out to `ps -o comm= -p <pid>` because reading
+    /// `/proc` isn't portable on macOS and `proc_pidpath` requires
+    /// linking against `libproc`. Cheap enough for a ~1 Hz poll.
+    #[cfg(unix)]
+    pub fn foreground_process_name(&self) -> Option<String> {
+        let shell = self.shell_pid?;
+        let fd = self.master.as_raw_fd()?;
+        let fg = unsafe { libc::tcgetpgrp(fd) };
+        if fg < 0 || (fg as u32) == shell {
+            return None;
+        }
+        let out = std::process::Command::new("ps")
+            .args(["-o", "comm=", "-p"])
+            .arg(fg.to_string())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8(out.stdout).ok()?;
+        let name = raw.trim();
+        if name.is_empty() {
+            return None;
+        }
+        // `ps` may return a full path on some configurations; keep
+        // the basename so the allowlist match is straightforward.
+        let basename = name.rsplit('/').next().unwrap_or(name);
+        Some(basename.to_string())
+    }
+
+    #[cfg(not(unix))]
+    pub fn foreground_process_name(&self) -> Option<String> {
+        None
+    }
+
+    /// True when the PTY's foreground process is a known CLI agent
+    /// that frame-redraws its UI on SIGWINCH. Matched against a small
+    /// allowlist; misses are benign (the Term keeps the default
+    /// scrollback-preserving resize behavior).
+    pub fn foreground_is_cli_agent(&self) -> bool {
+        let Some(name) = self.foreground_process_name() else {
+            return false;
+        };
+        matches!(
+            name.as_str(),
+            "claude" | "codex" | "aider" | "opencode" | "cursor-agent" | "qodo" | "goose"
+        )
+    }
+
     /// Restore a terminal with a plain-text scrollback snapshot.
     pub fn spawn_with_text_history(
         ctx: egui::Context,

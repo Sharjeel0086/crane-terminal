@@ -52,4 +52,4 @@ pub use index::{Column, Line, Point, Side};
 pub use mode::TermMode;
 pub use processor::Processor;
 pub use selection::{Selection, SelectionRange, SelectionType};
-pub use term::Term;
+pub use term::{FullGridClearBehavior, Term, TermNotification};

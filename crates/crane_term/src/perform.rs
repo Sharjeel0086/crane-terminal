@@ -14,6 +14,12 @@
 //! integration cut. Anything we DON'T need (kitty image protocol,
 //! tmux control mode, etc.) intentionally falls through to the
 //! no-op default — those have no Crane equivalent.
+//!
+//! [`OscWatcher`] is a separate, low-level `vte::Perform` impl that
+//! only reacts to OSC 9 / OSC 777 (desktop-notification escapes the
+//! `ansi::Handler` trait does not surface). The [`crate::processor`]
+//! drives both adapters from the same byte stream so the existing
+//! grid/scrollback parse path is unchanged.
 
 use crate::handler::Handler;
 
@@ -203,5 +209,168 @@ impl<H: Handler> vte::ansi::Handler for Bridge<'_, H> {
 
     fn bell(&mut self) {
         self.inner.bell();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OSC notification watcher
+// ---------------------------------------------------------------------------
+
+/// Low-level `vte::Perform` adapter that intercepts OSC 9 / OSC 777
+/// (desktop-notification escapes) and forwards their payload to our
+/// [`Handler::osc_notification`]. Every other Perform callback is a
+/// no-op — the existing [`Bridge`] / `vte::ansi::Processor` path owns
+/// real grid mutation. Running this as a separate parser instance is
+/// cheaper than reimplementing `ansi::Handler` and keeps the OSC
+/// surface independent of vte's `Handler` trait shape, which has no
+/// callback for 9 / 777.
+///
+/// **OSC 9** is the de-facto iTerm2 notification convention:
+///   `\e]9;<utf8 text>\a`
+///
+/// **OSC 777** is the urgency-aware variant used by some senders
+/// (xdotool, libnotify-bridges):
+///   `\e]777;notify;<title>;<body>\a`
+/// We treat any OSC 777 with a `notify` sub-action as urgent and join
+/// remaining params with " — " for display.
+pub struct OscWatcher<'a, H: Handler> {
+    pub inner: &'a mut H,
+}
+
+impl<H: Handler> vte::Perform for OscWatcher<'_, H> {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if params.is_empty() || params[0].is_empty() {
+            return;
+        }
+        match params[0] {
+            // OSC 9 — iTerm2-style notification. Remaining params
+            // joined with ';' (a body may legitimately contain
+            // semicolons when an upstream embedded them; we round-
+            // trip).
+            b"9" => {
+                if params.len() < 2 {
+                    return;
+                }
+                let body = join_params_utf8(&params[1..]);
+                if !body.is_empty() {
+                    self.inner.osc_notification(&body, false);
+                }
+            }
+            // OSC 777 — urgency-aware. Expected shape:
+            //   777 ; notify ; title ; body
+            // but the trailing fields are optional. We forward
+            // whatever is present, joining with " — " when both
+            // title and body are non-empty so the toast shows
+            // "title — body".
+            b"777" => {
+                if params.len() < 2 {
+                    return;
+                }
+                let action = std::str::from_utf8(params[1]).unwrap_or("");
+                if !action.eq_ignore_ascii_case("notify") {
+                    return;
+                }
+                let title = params
+                    .get(2)
+                    .map(|p| String::from_utf8_lossy(p).into_owned())
+                    .unwrap_or_default();
+                let body = params
+                    .get(3)
+                    .map(|p| String::from_utf8_lossy(p).into_owned())
+                    .unwrap_or_default();
+                let combined = match (title.is_empty(), body.is_empty()) {
+                    (true, true) => return,
+                    (false, true) => title,
+                    (true, false) => body,
+                    (false, false) => format!("{title} — {body}"),
+                };
+                self.inner.osc_notification(&combined, true);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn join_params_utf8(parts: &[&[u8]]) -> String {
+    let mut out = String::new();
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push(';');
+        }
+        out.push_str(&String::from_utf8_lossy(p));
+    }
+    out
+}
+
+#[cfg(test)]
+mod osc_tests {
+    use super::*;
+    use crate::handler::Handler;
+
+    #[derive(Default)]
+    struct Collector {
+        events: Vec<(String, bool)>,
+    }
+
+    impl Handler for Collector {
+        fn osc_notification(&mut self, body: &str, urgent: bool) {
+            self.events.push((body.to_string(), urgent));
+        }
+    }
+
+    fn run(bytes: &[u8]) -> Vec<(String, bool)> {
+        let mut parser = vte::Parser::new();
+        let mut sink = Collector::default();
+        let mut watcher = OscWatcher { inner: &mut sink };
+        parser.advance(&mut watcher, bytes);
+        sink.events
+    }
+
+    #[test]
+    fn osc9_bel_terminated() {
+        let evts = run(b"\x1b]9;Claude is done\x07");
+        assert_eq!(evts, vec![("Claude is done".into(), false)]);
+    }
+
+    #[test]
+    fn osc9_st_terminated() {
+        let evts = run(b"\x1b]9;hello world\x1b\\");
+        assert_eq!(evts, vec![("hello world".into(), false)]);
+    }
+
+    #[test]
+    fn osc777_notify_title_and_body_marked_urgent() {
+        let evts = run(b"\x1b]777;notify;Crane;Build failed\x07");
+        assert_eq!(evts, vec![("Crane \u{2014} Build failed".into(), true)]);
+    }
+
+    #[test]
+    fn osc777_non_notify_action_ignored() {
+        let evts = run(b"\x1b]777;set;title;body\x07");
+        assert!(evts.is_empty());
+    }
+
+    #[test]
+    fn unrelated_osc_codes_ignored() {
+        let evts = run(b"\x1b]2;new title\x07\x1b]4;1;rgb:ff/00/00\x07");
+        assert!(evts.is_empty());
+    }
+
+    #[test]
+    fn empty_osc9_body_dropped() {
+        let evts = run(b"\x1b]9;\x07");
+        assert!(evts.is_empty());
+    }
+
+    /// Regression guard for the integration path: text → OSC 9 → more
+    /// text in one chunk. The parser must surface exactly one
+    /// notification and leave the surrounding text undisturbed. We
+    /// only assert on the notification side here — grid mutation is
+    /// driven by the separate `ansi::Processor` in
+    /// `crate::Processor`.
+    #[test]
+    fn osc9_inline_with_text_emits_once() {
+        let evts = run(b"hello \x1b]9;ping\x07 world");
+        assert_eq!(evts, vec![("ping".into(), false)]);
     }
 }

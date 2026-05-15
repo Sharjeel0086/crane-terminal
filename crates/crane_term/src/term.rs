@@ -51,6 +51,59 @@ pub struct Term {
     /// (DSR, DA, title acks, etc.). Drained by the PTY reader thread
     /// via [`Term::take_pty_replies`] after each parse pass.
     pty_replies: Vec<u8>,
+    /// Pending desktop notifications (OSC 9 / OSC 777) emitted by the
+    /// PTY since the last drain. Crane's render loop drains via
+    /// [`Term::take_notifications`] each frame and routes them to the
+    /// App-level toast queue. Bounded loosely by drop-after-32 so a
+    /// runaway emitter can't pin unbounded heap if the UI is paused.
+    notifications: Vec<TermNotification>,
+    /// Whether full-screen redraws on this Term should be treated as
+    /// ephemeral frames (the live grid is mutable surface, never
+    /// history) or as scrollback-producing output (the default Bash /
+    /// Zsh semantics).
+    ///
+    /// `Scroll` (default): primary-screen resizes reflow rows through
+    /// scrollback, and `\e[2J` (ClearMode::All) evicts the visible
+    /// rows into scrollback. Matches xterm / iTerm / Terminal.app.
+    ///
+    /// `Clear`: primary-screen resizes resize the visible grid in
+    /// place without touching scrollback, and `\e[2J` resets the
+    /// visible grid in place. Matches `alt_screen` semantics on the
+    /// main screen. Enabled by Crane when a Claude Code / Codex /
+    /// aider-style CLI agent is the PTY foreground process — those
+    /// frame-redraw on SIGWINCH and would otherwise duplicate every
+    /// resize into scrollback. One-way for the rest of the Term's
+    /// life: agents do not typically exit and "return to scrollback
+    /// mode" within the same pane. See
+    /// `specs/tui-output-redraw/TECH.md` in warpdotdev/warp for the
+    /// original design rationale.
+    full_grid_clear_behavior: FullGridClearBehavior,
+}
+
+/// Resize / full-clear policy for the primary screen. See the
+/// `Term::full_grid_clear_behavior` field for semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FullGridClearBehavior {
+    /// Default. Visible rows evict into scrollback on `\e[2J` and on
+    /// primary-screen resize. Preserves history for `clear` / Ctrl-L
+    /// in a normal shell session.
+    #[default]
+    Scroll,
+    /// Treat the live grid as a mutable frame surface. `\e[2J` clears
+    /// in place; resize updates dimensions in place without touching
+    /// scrollback. Used while a CLI-agent TUI owns the PTY.
+    Clear,
+}
+
+/// Single desktop notification captured from an OSC 9 / OSC 777 the
+/// PTY emitted. See [`Handler::osc_notification`] for the wire
+/// format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermNotification {
+    pub body: String,
+    /// `true` for OSC 777 (`urgency=critical`-style senders);
+    /// `false` for plain OSC 9.
+    pub urgent: bool,
 }
 
 impl Term {
@@ -65,7 +118,29 @@ impl Term {
             saved_cursor: None,
             selection: None,
             pty_replies: Vec::new(),
+            notifications: Vec::new(),
+            full_grid_clear_behavior: FullGridClearBehavior::default(),
         }
+    }
+
+    /// Drain queued desktop notifications. Called by Crane's render
+    /// loop each frame; returns an empty Vec when nothing is pending.
+    pub fn take_notifications(&mut self) -> Vec<TermNotification> {
+        std::mem::take(&mut self.notifications)
+    }
+
+    /// One-way switch: tell this Term to treat primary-screen frame
+    /// redraws as ephemeral instead of scrollback-producing. See the
+    /// `full_grid_clear_behavior` field for the full semantics. Idempotent.
+    pub fn enable_full_grid_clear_behavior(&mut self) {
+        self.full_grid_clear_behavior = FullGridClearBehavior::Clear;
+    }
+
+    /// Whether [`Self::enable_full_grid_clear_behavior`] has been called.
+    /// Exposed mainly for tests and for UI affordances (e.g. a status-bar
+    /// "TUI mode" badge).
+    pub fn is_full_grid_clear_behavior_enabled(&self) -> bool {
+        self.full_grid_clear_behavior == FullGridClearBehavior::Clear
     }
 
     /// Drain accumulated outbound bytes (DSR / DA / title-ack
@@ -92,6 +167,30 @@ impl Term {
         if rows == self.grid.visible_rows && cols == self.grid.columns {
             return;
         }
+
+        // CLI-agent TUIs (Claude Code, Codex, aider, …) frame-redraw
+        // their whole UI on SIGWINCH. The pre-resize frame is in the
+        // live grid; the standard reflow-into-scrollback path would
+        // promote those rows to history a beat before the agent
+        // emits its new frame — and after the new frame lands the
+        // user sees both copies stacked. Warp's `FullGridClearBehavior`
+        // fix (`specs/tui-output-redraw/TECH.md` in warpdotdev/warp)
+        // scopes "resize in place" to active CLI-agent sessions, and
+        // we follow the same shape: in-place resize for the visible
+        // grid only when the flag is set AND we're not on the alt
+        // screen (alt-screen is already non-scrolling). Normal shells
+        // keep the reflow path so `clear` / Ctrl-L history semantics
+        // and width-change row unwrapping are unchanged.
+        if !self.mode.contains(TermMode::ALT_SCREEN)
+            && self.full_grid_clear_behavior == FullGridClearBehavior::Clear
+        {
+            self.grid.resize(rows, cols);
+            self.grid.cursor.input_needs_wrap = false;
+            self.grid.display_offset = self.grid.display_offset.min(self.scrollback.len());
+            self.mark_dirty();
+            return;
+        }
+
         let template = self.grid.cursor.template.clone();
 
         // Build a unified row vec: scrollback first (oldest first),
@@ -461,6 +560,22 @@ impl Term {
             &mut self.grid.rows[region.start],
             Row::new(self.grid.columns, &self.grid.cursor.template),
         );
+        // Standard rule: evict to scrollback unless we're on alt-
+        // screen (vim/htop/Less own that buffer and it isn't
+        // history) or the eviction is a `?2026`-redraw byproduct
+        // (in_sync_frame + same generation as the live cursor).
+        //
+        // An earlier attempt also suppressed eviction for a 400 ms
+        // window after an in-place resize, to defeat the
+        // SIGWINCH-redraw duplicate-stack artifact reported in
+        // dogfood. The window turned out to eat legitimate content
+        // when normal output streamed through the window (e.g., the
+        // user resized mid-message and the next few hundred ms of
+        // writes vanished into /dev/null). Reverted here. Resize
+        // duplication is back as a visual issue, but it's no longer
+        // data-destructive. Proper fix is the Warp-style Block model
+        // (memory: project_warp_style_rewrite) where scrollback only
+        // exists at block boundaries; tracked as a follow-up.
         if !self.mode.contains(TermMode::ALT_SCREEN) {
             let preserve = !self.in_sync_frame
                 || evicted.written_in_gen != self.current_sync_gen;
@@ -1175,6 +1290,20 @@ impl Handler for Term {
         // pane_view, not here — `Term` just exposes the grid +
         // scrollback for the painter to read.
     }
+
+    fn osc_notification(&mut self, body: &str, urgent: bool) {
+        // Cap so a runaway emitter (a CLI in a tight loop) can't
+        // grow this Vec unbounded between drains. 32 is well above
+        // the steady-state count (one toast per agent hook).
+        const MAX_QUEUE: usize = 32;
+        if self.notifications.len() >= MAX_QUEUE {
+            self.notifications.remove(0);
+        }
+        self.notifications.push(TermNotification {
+            body: body.to_string(),
+            urgent,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -1490,6 +1619,135 @@ mod tests {
                 assert_eq!(cell.ch, ' ');
             }
         }
+    }
+
+    // ---------------------------------------------------------------
+    // FullGridClearBehavior — Warp-parity fix
+    // (`specs/tui-output-redraw/TECH.md` in warpdotdev/warp).
+    //
+    // The CLI-agent resize-in-place gate. Default behavior must
+    // continue to reflow visible rows through scrollback (real
+    // shells), but Terms marked active-CLI-agent must NOT push the
+    // pre-resize frame into scrollback before SIGWINCH lands.
+    // ---------------------------------------------------------------
+
+    /// Baseline: with the flag OFF (default), a primary-screen
+    /// narrow-resize reflows content through scrollback in the
+    /// normal way. Existing `claude_code-style_redraw` users rely on
+    /// this for `clear` / Ctrl-L history.
+    #[test]
+    fn resize_default_behavior_can_grow_scrollback() {
+        let mut t = Term::new(5, 20);
+        // Fill the visible grid with five distinct rows.
+        let mut p = crate::Processor::new();
+        p.parse_bytes(&mut t, b"row0\r\nrow1\r\nrow2\r\nrow3\r\nrow4");
+        assert!(!t.is_full_grid_clear_behavior_enabled());
+        let before = t.scrollback.len();
+        // Narrow + shorter resize. Existing reflow path is free to
+        // promote evicted top rows into scrollback.
+        t.resize(3, 10);
+        let after = t.scrollback.len();
+        assert!(
+            after >= before,
+            "default behavior should be allowed to grow scrollback (was {before}, now {after})"
+        );
+    }
+
+    /// The actual fix: with the flag ON, a primary-screen narrow-
+    /// resize MUST NOT push pre-resize visible rows into scrollback.
+    /// The CLI agent will redraw its frame from scratch after
+    /// SIGWINCH; if the previous frame leaked into scrollback we get
+    /// the duplicate-stack-of-frames artifact.
+    #[test]
+    fn resize_in_place_when_flag_set_does_not_grow_scrollback() {
+        let mut t = Term::new(5, 20);
+        let mut p = crate::Processor::new();
+        p.parse_bytes(&mut t, b"row0\r\nrow1\r\nrow2\r\nrow3\r\nrow4");
+        let before = t.scrollback.len();
+
+        t.enable_full_grid_clear_behavior();
+        assert!(t.is_full_grid_clear_behavior_enabled());
+
+        // Narrower AND shorter — the case that triggered the bug
+        // in dogfood (`specs/tui-output-redraw/TECH.md` GH #9838 in
+        // warpdotdev/warp).
+        t.resize(3, 10);
+
+        assert_eq!(
+            t.scrollback.len(),
+            before,
+            "with the flag set, primary-screen resize must not promote rows to scrollback"
+        );
+        // And the grid must have been resized to the new dims.
+        assert_eq!(t.grid.visible_rows, 3);
+        assert_eq!(t.grid.columns, 10);
+    }
+
+    /// Widening behaves the same: in-place when the flag is set, no
+    /// scrollback growth.
+    #[test]
+    fn resize_in_place_widening_also_no_scrollback() {
+        let mut t = Term::new(5, 10);
+        let mut p = crate::Processor::new();
+        p.parse_bytes(&mut t, b"hello\r\nworld\r\n");
+        let before = t.scrollback.len();
+        t.enable_full_grid_clear_behavior();
+        t.resize(5, 40);
+        assert_eq!(t.scrollback.len(), before);
+        assert_eq!(t.grid.columns, 40);
+    }
+
+    /// `enable_full_grid_clear_behavior` is one-way: there is no
+    /// "disable" path. Calling it twice is a no-op. Matches Warp's
+    /// design (a finished block keeps the flag, and unsetting mid-
+    /// session would mis-attribute the agent's next frame as
+    /// history).
+    #[test]
+    fn enable_is_idempotent_and_one_way() {
+        let mut t = Term::new(5, 20);
+        assert!(!t.is_full_grid_clear_behavior_enabled());
+        t.enable_full_grid_clear_behavior();
+        t.enable_full_grid_clear_behavior();
+        assert!(t.is_full_grid_clear_behavior_enabled());
+    }
+
+    /// Even with `FullGridClearBehavior::Clear` set, LFs at the
+    /// scroll-region bottom MUST still evict to scrollback during
+    /// normal output. An earlier attempt to suppress eviction during
+    /// a post-resize window turned out to drop legitimate content
+    /// when normal output streamed through the window (reverted).
+    /// This test pins the contract: the flag affects resize only,
+    /// not linefeed behavior.
+    #[test]
+    fn linefeed_at_bottom_evicts_with_flag_set() {
+        let mut t = Term::new(3, 5);
+        let mut p = crate::Processor::new();
+        t.enable_full_grid_clear_behavior();
+        p.parse_bytes(&mut t, b"row0\r\nrow1\r\nrow2");
+        let before = t.scrollback.len();
+        p.parse_bytes(&mut t, b"\r\nrow3\r\nrow4\r\nrow5");
+        assert!(
+            t.scrollback.len() > before,
+            "flag must not suppress normal scrollback growth \
+             (was {before}, now {})",
+            t.scrollback.len()
+        );
+    }
+
+    /// Baseline: with the flag OFF (default), LFs at the bottom
+    /// DO evict to scrollback. Pins normal shell behavior.
+    #[test]
+    fn linefeed_at_bottom_evicts_to_scrollback_by_default() {
+        let mut t = Term::new(3, 5);
+        let mut p = crate::Processor::new();
+        p.parse_bytes(&mut t, b"row0\r\nrow1\r\nrow2");
+        let before = t.scrollback.len();
+        p.parse_bytes(&mut t, b"\r\nrow3\r\nrow4");
+        assert!(
+            t.scrollback.len() > before,
+            "default behavior must continue to grow scrollback (was {before}, now {})",
+            t.scrollback.len()
+        );
     }
 
     #[test]

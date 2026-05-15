@@ -24,7 +24,7 @@ mod views;
 use modals::{
     render_empty_state, render_help_modal, render_lsp_download_toast,
     render_lsp_install_prompt, render_missing_project_modal, render_new_workspace_modal,
-    render_settings_modal, render_update_toast,
+    render_notification_toast, render_settings_modal, render_update_toast,
 };
 
 use eframe::egui;
@@ -977,6 +977,19 @@ impl eframe::App for CraneApp {
         render_lsp_download_toast(&ctx, &self.app);
         self.app.update_check.drain();
         render_update_toast(&ctx, &mut self.app);
+        // Drain OSC 9 / OSC 777 notifications emitted by programs
+        // running in any Crane terminal pane and render the toast.
+        // Window-focus tracking lets the toast skip the macOS
+        // Notification Center banner when the user is already
+        // looking at the app.
+        self.app.window_focused = ctx.input(|i| i.focused);
+        self.app.drain_terminal_notifications();
+        // 1 Hz sweep that flips active CLI-agent Terms into the
+        // resize-in-place mode. Cheap when nothing is running; see
+        // `App::poll_cli_agent_sessions` for the cost model and the
+        // motivation (Warp's `specs/tui-output-redraw/TECH.md`).
+        self.app.poll_cli_agent_sessions();
+        render_notification_toast(&ctx, &mut self.app);
         for (path, text) in save_queue.into_inner() {
             self.app.lsp.did_save(
                 std::path::Path::new(&path),
