@@ -93,6 +93,15 @@ trash = "5"
 # FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW on
 # Windows. Cross-platform with no extra config.
 notify = "8"
+# OS-native desktop notification dispatch (macOS NSUserNotificationCenter,
+# Linux libnotify, Windows toast). Used by the OSC 9 / OSC 777 toast path
+# when the Crane window is unfocused — the in-app toast still always
+# fires; this just adds a Notification Center banner so background work
+# can grab the user's attention. We pin 4.x: 4.10+ supports
+# `Notification::summary/body/show()` we use, and macOS attribution falls
+# back to the calling process's CFBundleIdentifier (Crane when bundled,
+# the spawning terminal when `cargo run`).
+notify-rust = "4"
 # PDF viewer (Files Pane file tab). Binds to libpdfium.dylib at
 # runtime — we vendor the dylib via `make vendor-pdfium` so the bundle
 # step has full control over arch + signing. Default features cover

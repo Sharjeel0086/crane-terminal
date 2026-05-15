@@ -159,29 +159,27 @@ fn truncate_body(s: &str, max_chars: usize) -> String {
     out
 }
 
-/// Fire a macOS Notification Center banner via `osascript` when the
-/// Crane window isn't focused. No-op on other platforms (Linux:
-/// would shell out to `notify-send`; left to a follow-up). Best-
-/// effort — failures are swallowed.
-#[cfg(target_os = "macos")]
+/// Fire an OS-level notification (macOS Notification Center / Linux
+/// libnotify / Windows toast) when the Crane window isn't focused.
+/// In-app toast still always fires; this is the background-attention
+/// path. Best-effort — failures are swallowed.
+///
+/// We use [`notify_rust`] rather than shelling out to `osascript`
+/// because osascript attributes every notification it sends to
+/// "Script Editor.app" regardless of the title text, which surfaces
+/// as a confusing source in macOS Notification Center. `notify_rust`
+/// on macOS uses NSUserNotificationCenter, which inherits the
+/// calling process's bundle identity — so when Crane is launched
+/// from its bundled `.app`, the notification source reads "Crane".
+/// In dev (`cargo run`), it falls back to the spawning terminal's
+/// bundle, which is acceptable.
 fn fire_os_notification(n: &PaneNotification, window_focused: bool) {
     if window_focused {
         return;
     }
-    // osascript single-quoting is brittle around embedded quotes;
-    // escape just `"` and `\` so the script literal stays valid.
-    let body = n
-        .body
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
     let title = if n.urgent { "Crane — urgent" } else { "Crane" };
-    let script = format!(
-        "display notification \"{body}\" with title \"{title}\" sound name \"Submarine\""
-    );
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .spawn();
+    let _ = notify_rust::Notification::new()
+        .summary(title)
+        .body(&n.body)
+        .show();
 }
-
-#[cfg(not(target_os = "macos"))]
-fn fire_os_notification(_n: &PaneNotification, _window_focused: bool) {}
