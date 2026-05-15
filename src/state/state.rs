@@ -1893,13 +1893,20 @@ impl App {
         pruned
     }
 
-    /// Per-frame poll that prunes Workspaces whose backing directory
-    /// has disappeared (covers `git worktree remove` run from a
-    /// terminal pane). Throttled to 3 s. Lightweight — only stats
-    /// each Workspace path, no git subprocess. Adding new worktrees
-    /// discovered externally still needs a `reindex_git_state` pass
-    /// (startup / `git init`); pruning is the common case and the
-    /// one users actually notice.
+    /// Per-frame poll that keeps each Project's Workspaces in sync
+    /// with what `git worktree list` says on disk:
+    /// * Workspaces whose backing directory has disappeared get
+    ///   pruned (covers `git worktree remove` run from a terminal
+    ///   pane).
+    /// * Worktrees on disk that aren't in the in-memory list get
+    ///   appended (covers `git worktree add <path>` run from a
+    ///   terminal pane).
+    /// Throttled to 3 s. Both halves are cheap: prune is path.exists()
+    /// per Workspace, scan is one `git worktree list --porcelain`
+    /// subprocess per Project (~10 ms each, completes inside a
+    /// frame). The two-directional sweep is what makes "drop into a
+    /// terminal, run git worktree add, see it appear in the Left
+    /// Panel" work without an app restart.
     pub fn poll_dead_worktrees(&mut self, _ctx: &egui::Context) {
         const THROTTLE: std::time::Duration = std::time::Duration::from_secs(3);
         let now = Instant::now();
@@ -1910,6 +1917,70 @@ impl App {
         }
         self.last_worktree_prune = Some(now);
         self.prune_dead_worktrees();
+        self.scan_new_worktrees();
+    }
+
+    /// Scan each non-missing Project for worktrees that exist on
+    /// disk but aren't represented in its in-memory Workspaces list,
+    /// and append them. Counterpart to [`Self::prune_dead_worktrees`].
+    /// Idempotent — a path that's already tracked is skipped.
+    fn scan_new_worktrees(&mut self) {
+        use std::collections::HashSet;
+
+        let refresh_targets: Vec<(ProjectId, PathBuf)> = self
+            .projects
+            .iter()
+            .filter(|p| !p.missing && p.path.exists())
+            .map(|p| (p.id, p.path.clone()))
+            .collect();
+
+        for (pid, path) in refresh_targets {
+            let new_infos = crate::git::list_workspaces(&path);
+            if new_infos.is_empty() {
+                continue;
+            }
+            let existing_wt_paths: HashSet<PathBuf> = self
+                .projects
+                .iter()
+                .find(|p| p.id == pid)
+                .map(|p| p.workspaces.iter().map(|w| w.path.clone()).collect())
+                .unwrap_or_default();
+            for info in new_infos {
+                if existing_wt_paths.contains(&info.path) {
+                    continue;
+                }
+                let wt_id = self.next_workspace;
+                self.next_workspace += 1;
+                let tab_id = self.next_tab;
+                self.next_tab += 1;
+                let mut layout = Layout::new(info.path.clone());
+                layout.ensure_initial_welcome();
+                let tab = Tab {
+                    id: tab_id,
+                    name: "Terminal".into(),
+                    layout,
+                    tint: None,
+                    git_log_visible: false,
+                    git_log_state: None,
+                };
+                let new_workspace = Workspace {
+                    id: wt_id,
+                    name: info.branch,
+                    display_name: None,
+                    path: info.path,
+                    tabs: vec![tab],
+                    active_tab: Some(tab_id),
+                    expanded: true,
+                    git_status: None,
+                    last_status_refresh: None,
+                    git_job: None,
+                    tint: None,
+                };
+                if let Some(project) = self.projects.iter_mut().find(|p| p.id == pid) {
+                    project.workspaces.push(new_workspace);
+                }
+            }
+        }
     }
 
     /// Run `git init` on a loose Project's path and re-discover its
