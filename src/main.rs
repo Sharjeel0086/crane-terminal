@@ -985,6 +985,9 @@ impl eframe::App for CraneApp {
         // Notification Center banner when the user is already
         // looking at the app.
         self.app.window_focused = ctx.input(|i| i.focused);
+        // Clicking an OS notification banner activates Crane; catch that
+        // focus-gain and jump to the notification's source Tab.
+        self.app.handle_focus_navigation();
         self.app.drain_terminal_notifications();
         // 1 Hz sweep that flips active CLI-agent Terms into the
         // resize-in-place mode. Cheap when nothing is running; see
