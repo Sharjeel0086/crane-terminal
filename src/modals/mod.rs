@@ -3,6 +3,7 @@ pub mod confirm_delete_file;
 pub mod confirm_quit;
 pub mod confirm_remove_worktree;
 pub mod empty_state;
+pub mod find_in_files;
 pub mod help;
 pub mod lsp_install;
 pub mod missing_project;

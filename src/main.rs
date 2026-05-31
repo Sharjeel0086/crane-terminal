@@ -689,6 +689,7 @@ impl eframe::App for CraneApp {
         let modal_open = self.app.show_settings
             || self.app.show_help
             || self.app.new_workspace_modal.is_some()
+            || self.app.find_in_files.is_some()
             || !self.app.missing_project_modals.is_empty()
             || self.pending_close.is_some();
         if modal_open {
@@ -964,6 +965,7 @@ impl eframe::App for CraneApp {
         render_missing_project_modal(&ctx, &mut self.app);
         render_new_workspace_modal(&ctx, &mut self.app);
         render_help_modal(&ctx, &mut self.app);
+        modals::find_in_files::render(&ctx, &mut self.app);
         let settings_effect = render_settings_modal(&ctx, &mut self.app, startup::apply_style);
         if matches!(settings_effect, modals::settings::SettingsEffect::ReloadFonts) {
             startup::load_fonts(&ctx, self.app.custom_mono_font.as_deref());
@@ -1070,6 +1072,7 @@ impl eframe::App for CraneApp {
             let overlay_visible = self.app.show_settings
                 || self.app.show_help
                 || self.app.new_workspace_modal.is_some()
+                || self.app.find_in_files.is_some()
                 || self.app.pending_remove_worktree.is_some()
                 || self.app.pending_close_tab.is_some()
                 || self.app.pending_delete_file.is_some()

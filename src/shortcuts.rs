@@ -11,6 +11,30 @@ pub fn handle(
     app: &mut App,
     pending_close: &mut Option<PaneId>,
 ) {
+    // Cmd+Shift+F — Find in Files. Handled before the modal-guard so
+    // it opens regardless of any other modal state (and so it can be
+    // re-triggered to refocus its query box if already open).
+    let open_find = ctx.input_mut(|i| {
+        let pressed = (i.modifiers.command || i.modifiers.mac_cmd)
+            && i.modifiers.shift
+            && i.key_pressed(egui::Key::F);
+        if pressed {
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::F,
+            );
+            i.consume_key(
+                egui::Modifiers::MAC_CMD | egui::Modifiers::SHIFT,
+                egui::Key::F,
+            );
+        }
+        pressed
+    });
+    if open_find {
+        crate::modals::find_in_files::open(app);
+        return;
+    }
+
     // When any modal is open, Cmd+W closes the modal instead of the
     // pane underneath. Also absorb Escape. Everything else falls
     // through so Cmd+S etc. still work inside modals.
@@ -28,6 +52,7 @@ pub fn handle(
         || app.pending_delete_file.is_some()
         || app.pending_quit_modal
         || !app.missing_project_modals.is_empty()
+        || app.find_in_files.is_some()
         || pending_close.is_some();
     if modal_open {
         let (cmd_w, esc) = ctx.input_mut(|i| {
@@ -64,6 +89,9 @@ pub fn handle(
             }
             if esc && !app.missing_project_modals.is_empty() {
                 app.missing_project_modals.clear();
+            }
+            if app.find_in_files.is_some() {
+                crate::modals::find_in_files::close(app);
             }
             if esc && pending_close.is_some() {
                 *pending_close = None;

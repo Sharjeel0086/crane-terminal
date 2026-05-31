@@ -108,6 +108,15 @@ notify-rust = "4"
 # pdfium_latest + thread_safe + image (image::DynamicImage round-trip
 # into egui::ColorImage).
 pdfium-render = "0.9"
+# Pure-Rust grep stack — same engine ripgrep itself uses. Wires gitignore-
+# aware filesystem walking (`ignore`) into a streaming matcher
+# (`grep-searcher` + `grep-regex`). Used by the Find in Files modal so
+# users don't need to install ripgrep separately. Static link, no
+# subprocess.
+ignore = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

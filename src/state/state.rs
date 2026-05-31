@@ -611,6 +611,10 @@ pub struct App {
     /// once a second, wasteful every frame. `None` = never polled.
     /// See [`App::poll_cli_agent_sessions`].
     pub last_cli_agent_poll: Option<Instant>,
+    /// Find in Files modal state (⌘⇧F). `Some` while the modal is
+    /// open; dropped on close. Owns the worker-thread cancel flag and
+    /// the shared results buffer the rg subprocess writes into.
+    pub find_in_files: Option<crate::modals::find_in_files::FindInFilesState>,
     next_project: ProjectId,
     next_workspace: WorkspaceId,
     next_tab: TabId,
@@ -677,6 +681,7 @@ impl App {
             active_notification: None,
             window_focused: true,
             last_cli_agent_poll: None,
+            find_in_files: None,
             next_project: 1,
             next_workspace: 1,
             next_tab: 1,
