@@ -25,6 +25,45 @@ pub struct PaneNotification {
     pub created_at: Instant,
 }
 
+/// Length of the initial "catch the eye" burst, in seconds. After this
+/// the attention indicator settles into a calm persistent dot that
+/// stays until the user actually opens the tab.
+pub const ATTENTION_BURST: f32 = 1.6;
+
+/// Visual state for a row carrying a pending notification. `glow` is the
+/// 0..1 burst intensity (three decaying `|sin|` humps over
+/// [`ATTENTION_BURST`], then 0); `dot` is whether to draw the persistent
+/// unread marker. Computed from the most-recent `attention_since` among
+/// the tabs aggregated into a row.
+#[derive(Clone, Copy, Default)]
+pub struct AttentionViz {
+    pub glow: f32,
+    pub dot: bool,
+}
+
+impl AttentionViz {
+    pub fn from_since(since: Option<Instant>) -> Self {
+        match since {
+            None => Self::default(),
+            Some(t) => {
+                let e = t.elapsed().as_secs_f32();
+                let glow = if e < ATTENTION_BURST {
+                    let phase = e / ATTENTION_BURST;
+                    (phase * 3.0 * std::f32::consts::PI).sin().abs() * (1.0 - phase)
+                } else {
+                    0.0
+                };
+                Self { glow, dot: true }
+            }
+        }
+    }
+    /// True while the burst animation is still running — the caller uses
+    /// this to keep requesting repaints so the glow animates.
+    pub fn animating(since: Option<Instant>) -> bool {
+        since.is_some_and(|t| t.elapsed().as_secs_f32() < ATTENTION_BURST)
+    }
+}
+
 fn shellexpand_home(s: &str) -> String {
     if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\"))
         && let Some(home) = crate::util::home_dir() {
@@ -53,6 +92,12 @@ pub struct Tab {
     /// Lazy-initialized on first show. None means the user has never
     /// opened the pane on this Tab. Persisted in session.json.
     pub git_log_state: Option<crate::git_log::GitLogState>,
+    /// Set when a terminal in this Tab emitted a desktop notification
+    /// while the Tab wasn't the active one. Drives the Left Panel
+    /// attention pulse + persistent unread dot, and is cleared the
+    /// moment the user makes this Tab active. `None` = no pending
+    /// attention. Not persisted — notifications are session-ephemeral.
+    pub attention_since: Option<Instant>,
 }
 
 pub struct Workspace {
@@ -695,6 +740,7 @@ impl App {
     /// empty Vec). Called once per render frame from `main.rs`.
     pub fn drain_terminal_notifications(&mut self) {
         const MAX_QUEUE: usize = 64;
+        let active = self.active;
         for project in &mut self.projects {
             let pid = project.id;
             for workspace in &mut project.workspaces {
@@ -708,6 +754,18 @@ impl App {
                         for (idx, tk) in tp.tabs.iter_mut().enumerate() {
                             let events = tk.terminal.term.lock().take_notifications();
                             for ev in events {
+                                // Flag the source Tab so the Left Panel
+                                // pulses + keeps an unread dot until the
+                                // user visits it. Skip if it's already
+                                // the active Tab — no point nagging about
+                                // the surface you're looking at. Don't
+                                // overwrite an earlier pending timestamp,
+                                // so the dot reflects the first ping.
+                                if active != Some((pid, wid, tid))
+                                    && tab.attention_since.is_none()
+                                {
+                                    tab.attention_since = Some(Instant::now());
+                                }
                                 if self.pending_notifications.len() >= MAX_QUEUE {
                                     self.pending_notifications.pop_front();
                                 }
@@ -843,6 +901,17 @@ impl App {
     /// dozens of call sites.
     pub fn sync_tab_mru(&mut self) {
         let Some(cur) = self.active else { return };
+        // Visiting a Tab clears its pending notification attention. Done
+        // here because this runs every frame for the active Tab,
+        // covering every code path that sets `active` (click, shortcut,
+        // toast navigation) without threading a setter everywhere.
+        let (pid, wid, tid) = cur;
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == pid)
+            && let Some(w) = p.workspaces.iter_mut().find(|w| w.id == wid)
+            && let Some(t) = w.tabs.iter_mut().find(|t| t.id == tid)
+        {
+            t.attention_since = None;
+        }
         if self.tab_mru.first() == Some(&cur) {
             return;
         }
@@ -999,6 +1068,7 @@ impl App {
                 tint: None,
                 git_log_visible: false,
                 git_log_state: None,
+                attention_since: None,
             };
             if first_active.is_none() {
                 first_active = Some((wt_id, tab_id));
@@ -1192,6 +1262,7 @@ impl App {
                     tint: None,
                     git_log_visible: false,
                     git_log_state: None,
+                attention_since: None,
                 };
                 let new_workspace = Workspace {
                     id: wt_id,
@@ -1989,6 +2060,7 @@ impl App {
                     tint: None,
                     git_log_visible: false,
                     git_log_state: None,
+                attention_since: None,
                 };
                 let new_workspace = Workspace {
                     id: wt_id,
@@ -2148,6 +2220,7 @@ impl App {
             tint: None,
             git_log_visible: false,
             git_log_state: None,
+            attention_since: None,
         });
         wt.active_tab = Some(tab_id);
         self.active = Some((pid, wid, tab_id));
@@ -2419,6 +2492,7 @@ impl App {
                     tint: None,
                     git_log_visible: false,
                     git_log_state: None,
+                attention_since: None,
                 };
                 project.workspaces.push(Workspace {
                     id: wt_id,

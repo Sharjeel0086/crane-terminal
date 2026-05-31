@@ -525,6 +525,7 @@ impl STab {
                 has_focus: false,
                 filter_lane_cache: None,
             }),
+            attention_since: None,
         }
     }
 }

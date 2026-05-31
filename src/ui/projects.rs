@@ -1,4 +1,5 @@
-use crate::state::App;
+use crate::state::{App, AttentionViz, Project, Workspace};
+use std::time::Instant;
 use crate::ui::util::{
     accent, draw_row, draw_trailing, full_width_primary_button, muted, RowConfig,
 };
@@ -100,6 +101,19 @@ fn reveal_in_file_manager(path: &std::path::Path) {
     }
 }
 
+/// Most-recent pending-notification timestamp among a Workspace's Tabs.
+/// `None` when no Tab in the Workspace is awaiting attention.
+fn workspace_attention(w: &Workspace) -> Option<Instant> {
+    w.tabs.iter().filter_map(|t| t.attention_since).max()
+}
+
+/// Most-recent pending-notification timestamp among all Tabs in a
+/// Project (across every Workspace). Used to surface attention on a
+/// collapsed Project / folder-group row.
+fn project_attention(p: &Project) -> Option<Instant> {
+    p.workspaces.iter().filter_map(workspace_attention).max()
+}
+
 pub fn render(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
     let full = ui.available_rect_before_wrap();
     let footer_h = 44.0;
@@ -156,6 +170,9 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
     });
     ui.add_space(4.0);
 
+    // Set true whenever any visible row is still in its attention
+    // burst, so we can keep requesting repaints to animate the glow.
+    let mut pulse_animating = false;
     let mut set_active: Option<(u64, u64, u64)> = None;
     let mut toggle_project: Option<u64> = None;
     let mut toggle_worktree: Option<(u64, u64)> = None;
@@ -266,6 +283,21 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                         .as_ref()
                         .and_then(|gp| app.group_tints.get(gp).copied())
                         .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b));
+                    // Attention surfaces on the group header only while
+                    // the group is collapsed (its Project rows hidden) —
+                    // aggregate over every Tab in every member Project.
+                    let group_since = if group_is_collapsed {
+                        app.projects
+                            .iter()
+                            .filter(|p| p.group_path == project.group_path)
+                            .filter_map(project_attention)
+                            .max()
+                    } else {
+                        None
+                    };
+                    if AttentionViz::animating(group_since) {
+                        pulse_animating = true;
+                    }
                     let folder_row = draw_row(
                         ui,
                         RowConfig {
@@ -273,6 +305,7 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                             expanded: Some(!group_is_collapsed),
                             leading: Some(icons::FOLDER),
                             leading_color: Some(group_tint.unwrap_or_else(muted)),
+                            attention: AttentionViz::from_since(group_since),
                             label: &group_name,
                             label_color: Some(group_tint.unwrap_or_else(muted)),
                             is_active: false,
@@ -398,12 +431,24 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                 let allow_individual_remove = !in_multi_group || project.missing;
                 let row_trailing_count = if allow_individual_remove { 2 } else { 1 };
                 let project_icon = if is_loose { icons::FOLDER } else { icons::CUBE };
+                // Attention surfaces on the Project row only while it's
+                // collapsed (Workspace / Tab rows hidden) — aggregate
+                // over every Tab in the Project.
+                let project_since = if project.expanded {
+                    None
+                } else {
+                    project_attention(project)
+                };
+                if AttentionViz::animating(project_since) {
+                    pulse_animating = true;
+                }
                 let row = draw_row(
                     ui,
                     RowConfig {
                         depth: project_depth,
                         expanded: Some(project.expanded),
                         leading: Some(project_icon),
+                        attention: AttentionViz::from_since(project_since),
                         leading_color: Some(tint_color.unwrap_or_else(accent)),
                         label: &project.name,
                         label_color: tint_color,
@@ -682,6 +727,17 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                         } else {
                             None
                         });
+                        // Attention surfaces on the Workspace row only
+                        // while it's collapsed (its Tab rows hidden) —
+                        // aggregate over the Workspace's Tabs.
+                        let wt_since = if wt.expanded {
+                            None
+                        } else {
+                            workspace_attention(wt)
+                        };
+                        if AttentionViz::animating(wt_since) {
+                            pulse_animating = true;
+                        }
                         let wt_row = draw_row(
                             ui,
                             RowConfig {
@@ -696,6 +752,7 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                                 badge,
                                 trailing_count: 1,
                                 tree_guides: in_group, checkbox: None,
+                                attention: AttentionViz::from_since(wt_since),
                             },
                         );
                         let wt_trailing = draw_trailing(
@@ -900,6 +957,14 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                                 } else {
                                     None
                                 });
+                                // The Tab row is the leaf: it carries
+                                // its own pending-notification attention
+                                // directly. Cleared when the user makes
+                                // it active.
+                                let tab_since = tab.attention_since;
+                                if AttentionViz::animating(tab_since) {
+                                    pulse_animating = true;
+                                }
                                 let tab_row = draw_row(
                                     ui,
                                     RowConfig {
@@ -914,6 +979,7 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                                         badge: None,
                                         trailing_count: 1,
                                         tree_guides: in_group, checkbox: None,
+                                        attention: AttentionViz::from_since(tab_since),
                                     },
                                 );
                                 let tab_trailing = draw_trailing(
@@ -1036,6 +1102,12 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
             }
         });
 
+    // Keep animating the attention burst glow while any visible row is
+    // still inside its burst window. Once every burst has settled into
+    // a static dot, this stops and the tree goes back to idle repaints.
+    if pulse_animating {
+        ctx.request_repaint();
+    }
 
     // Flush tab rename edits back into App.
     if let (Some(buf), Some(slot)) = (rename_buffer.as_ref(), app.renaming_tab.as_mut()) {

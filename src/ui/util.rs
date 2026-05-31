@@ -132,6 +132,11 @@ pub struct RowConfig<'a> {
     /// `RowResult::checkbox_clicked`; click anywhere else still fires
     /// `main_clicked`. Used by the Changes tree for stage / unstage toggles.
     pub checkbox: Option<CheckState>,
+    /// Pending-notification attention for this row. `glow` (0..1) paints
+    /// an accent wash for the initial burst; `dot` draws a persistent
+    /// unread marker that stays until the user visits the Tab. Default
+    /// (both zero/false) = no attention.
+    pub attention: crate::state::AttentionViz,
 }
 
 pub struct RowResult {
@@ -182,6 +187,19 @@ pub fn draw_row(ui: &mut Ui, cfg: RowConfig<'_>) -> RowResult {
             1.0,
             accent(),
         );
+    }
+    // Attention burst: accent wash over the row scaled by the current
+    // glow intensity. Painted over hover/active so it reads as "look
+    // here" even on the active-coloured surface.
+    if cfg.attention.glow > 0.01 {
+        let a = accent();
+        let wash = Color32::from_rgba_unmultiplied(
+            a.r(),
+            a.g(),
+            a.b(),
+            (110.0 * cfg.attention.glow).clamp(0.0, 255.0) as u8,
+        );
+        painter.rect_filled(rect.shrink2(Vec2::new(4.0, 1.0)), 4.0, wash);
     }
 
     if cfg.tree_guides && cfg.depth > 0 {
@@ -400,6 +418,16 @@ pub fn draw_row(ui: &mut Ui, cfg: RowConfig<'_>) -> RowResult {
                 add_color,
             );
         }
+    }
+
+    // Persistent unread dot — stays after the burst glow fades, until
+    // the user visits the Tab. Sits at the right edge, shifted left of
+    // any trailing buttons. Hidden while the row is hovered so it never
+    // fights the close / action buttons that appear on hover.
+    if cfg.attention.dot && !hovered {
+        let trailing_reserve = (cfg.trailing_count as f32) * 22.0;
+        let dot_c = Pos2::new(rect.max.x - 12.0 - trailing_reserve, rect.center().y);
+        painter.circle_filled(dot_c, 3.5, accent());
     }
 
     if hovered {

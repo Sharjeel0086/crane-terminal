@@ -846,6 +846,7 @@ fn render_change_node(
                 trailing_count: 0,
                 tree_guides: false,
                 checkbox: Some(check),
+                attention: Default::default(),
             },
         );
         if row.checkbox_clicked {
@@ -916,6 +917,7 @@ fn render_change_node(
                 trailing_count: 0,
                 tree_guides: false,
                 checkbox: Some(check),
+                attention: Default::default(),
             },
         );
         if row.checkbox_clicked {
@@ -1337,6 +1339,7 @@ fn render_fs_dir(
                 badge: None,
                 trailing_count: 0,
                         tree_guides: false, checkbox: None,
+                        attention: Default::default(),
             },
         );
         if row.main_clicked {
