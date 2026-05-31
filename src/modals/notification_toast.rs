@@ -27,7 +27,8 @@ pub fn render(ctx: &egui::Context, app: &mut App) {
         // banner is for users who switched away. Done before latching
         // `active_notification` so a rapid burst still produces one
         // banner per event.
-        fire_os_notification(&next, app.window_focused);
+        let (proj, ws, _tab) = app.notification_source_names(&next);
+        fire_os_notification(&next, app.window_focused, &proj, &ws);
         app.active_notification = Some(next);
     }
 
@@ -43,6 +44,9 @@ pub fn render(ctx: &egui::Context, app: &mut App) {
     let Some(notif) = app.active_notification.clone() else {
         return;
     };
+    // Resolve which project / workspace / tab is pinging us so the
+    // toast names its source — critical when 10+ projects are open.
+    let (proj_name, ws_name, tab_name) = app.notification_source_names(&notif);
 
     // Egui repaints on input; nothing in this toast triggers input
     // by itself, so without a manual repaint the TTL would never
@@ -95,17 +99,33 @@ pub fn render(ctx: &egui::Context, app: &mut App) {
                                 .color(header_color),
                         );
                         ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new("Terminal notification")
-                                    .size(13.0)
-                                    .color(theme.text.to_color32())
-                                    .strong(),
-                            );
+                            // Source breadcrumb: project in accent, then
+                            // workspace · tab muted. Tells the user which
+                            // of many open projects emitted this.
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.label(
+                                    egui::RichText::new(&proj_name)
+                                        .size(13.0)
+                                        .color(header_color)
+                                        .strong(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{}  {}  {}",
+                                        egui_phosphor::regular::CARET_RIGHT,
+                                        ws_name,
+                                        tab_name,
+                                    ))
+                                    .size(11.0)
+                                    .color(theme.text_muted.to_color32()),
+                                );
+                            });
                             let body = truncate_body(&notif.body, 180);
                             ui.label(
                                 egui::RichText::new(body)
                                     .size(12.0)
-                                    .color(theme.text_muted.to_color32()),
+                                    .color(theme.text.to_color32()),
                             );
                         });
                         ui.with_layout(
@@ -173,13 +193,23 @@ fn truncate_body(s: &str, max_chars: usize) -> String {
 /// from its bundled `.app`, the notification source reads "Crane".
 /// In dev (`cargo run`), it falls back to the spawning terminal's
 /// bundle, which is acceptable.
-fn fire_os_notification(n: &PaneNotification, window_focused: bool) {
+fn fire_os_notification(
+    n: &PaneNotification,
+    window_focused: bool,
+    project: &str,
+    workspace: &str,
+) {
     if window_focused {
         return;
     }
-    let title = if n.urgent { "Crane — urgent" } else { "Crane" };
+    // Name the source in the banner title so a background ping from one
+    // of many open projects is identifiable without switching to Crane.
+    let mut title = format!("Crane — {project} / {workspace}");
+    if n.urgent {
+        title.push_str(" (urgent)");
+    }
     let _ = notify_rust::Notification::new()
-        .summary(title)
+        .summary(&title)
         .body(&n.body)
         .show();
 }

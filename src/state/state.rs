@@ -808,6 +808,28 @@ impl App {
         self.active = Some((n.project, n.workspace, n.tab));
     }
 
+    /// Resolve a notification's source IDs to display names:
+    /// `(project, workspace, tab)`. Any leg that's gone stale (project
+    /// closed, workspace removed) falls back to a placeholder so the
+    /// toast still shows *something* useful rather than nothing. Used
+    /// by the toast header + OS banner so the user can tell which of
+    /// 10+ open projects is pinging them.
+    pub fn notification_source_names(
+        &self,
+        n: &PaneNotification,
+    ) -> (String, String, String) {
+        let project = self.projects.iter().find(|p| p.id == n.project);
+        let workspace = project
+            .and_then(|p| p.workspaces.iter().find(|w| w.id == n.workspace));
+        let tab = workspace
+            .and_then(|w| w.tabs.iter().find(|t| t.id == n.tab));
+        (
+            project.map(|p| p.name.clone()).unwrap_or_else(|| "—".into()),
+            workspace.map(|w| w.label()).unwrap_or_else(|| "—".into()),
+            tab.map(|t| t.name.clone()).unwrap_or_else(|| "—".into()),
+        )
+    }
+
     pub fn ensure_initial(&mut self, _ctx: &egui::Context) {
         // Intentionally empty. First launch shows an empty state — the user
         // picks a project via "Add Project…" in the Left Panel footer.
