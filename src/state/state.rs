@@ -651,19 +651,6 @@ pub struct App {
     /// the macOS Notification Center fallback so we don't double-
     /// notify when the user is already looking at the app.
     pub window_focused: bool,
-    /// `window_focused` from the previous frame, so we can detect the
-    /// unfocused → focused transition that happens when the user clicks
-    /// an OS notification banner (which activates Crane).
-    pub prev_window_focused: bool,
-    /// Source of the most-recent background notification (fired while
-    /// the window was unfocused), with its timestamp. On the next
-    /// focus-gain we navigate to this Tab — that's how "click the OS
-    /// banner → jump to the source" works without depending on the
-    /// deprecated `NSUserNotificationCenter` click-callback. Consumed
-    /// (taken) on use; ignored if older than [`Self::FOCUS_NAV_WINDOW`]
-    /// or if the Tab already lost its attention flag (user got there
-    /// another way).
-    pub pending_focus_nav: Option<(ProjectId, WorkspaceId, TabId, Instant)>,
     /// Timestamp of the last CLI-agent detection sweep. Throttled to
     /// 1 Hz because the probe shells out to `ps` per terminal — fine
     /// once a second, wasteful every frame. `None` = never polled.
@@ -738,8 +725,6 @@ impl App {
             pending_notifications: VecDeque::new(),
             active_notification: None,
             window_focused: true,
-            prev_window_focused: true,
-            pending_focus_nav: None,
             last_cli_agent_poll: None,
             find_in_files: None,
             next_project: 1,
@@ -756,11 +741,6 @@ impl App {
     pub fn drain_terminal_notifications(&mut self) {
         const MAX_QUEUE: usize = 64;
         let active = self.active;
-        let window_focused = self.window_focused;
-        // Most-recent background source seen this drain; assigned to
-        // `pending_focus_nav` after the walk so we don't borrow `self`
-        // mutably twice.
-        let mut bg_source: Option<(ProjectId, WorkspaceId, TabId, Instant)> = None;
         for project in &mut self.projects {
             let pid = project.id;
             for workspace in &mut project.workspaces {
@@ -786,13 +766,6 @@ impl App {
                                 {
                                     tab.attention_since = Some(Instant::now());
                                 }
-                                // Remember the source if it arrived while
-                                // we were in the background — the next
-                                // focus-gain (e.g. banner click) jumps
-                                // here. Latest non-active ping wins.
-                                if !window_focused && active != Some((pid, wid, tid)) {
-                                    bg_source = Some((pid, wid, tid, Instant::now()));
-                                }
                                 if self.pending_notifications.len() >= MAX_QUEUE {
                                     self.pending_notifications.pop_front();
                                 }
@@ -812,72 +785,6 @@ impl App {
                 }
             }
         }
-        if let Some(src) = bg_source {
-            self.pending_focus_nav = Some(src);
-        }
-    }
-
-    /// Length of the window after a background notification during which
-    /// a focus-gain is attributed to that notification. Generous enough
-    /// to cover clicking the banner from Notification Center, short
-    /// enough that an unrelated return to Crane minutes later doesn't
-    /// yank the user to a stale source.
-    pub const FOCUS_NAV_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
-
-    /// Detect the unfocused → focused transition (the user clicked the
-    /// OS notification banner, which activates Crane) and, if a recent
-    /// background notification is still unacknowledged, navigate to its
-    /// Tab. Call once per frame after `window_focused` is updated.
-    pub fn handle_focus_navigation(&mut self) {
-        let gained_focus = self.window_focused && !self.prev_window_focused;
-        self.prev_window_focused = self.window_focused;
-        if !gained_focus {
-            return;
-        }
-        let Some((pid, wid, tid, when)) = self.pending_focus_nav.take() else {
-            return;
-        };
-        if when.elapsed() > Self::FOCUS_NAV_WINDOW {
-            return;
-        }
-        // Only jump if the Tab is still flagged — if the user already
-        // visited it (attention cleared) we'd be hijacking them.
-        let still_pending = self
-            .projects
-            .iter()
-            .find(|p| p.id == pid)
-            .and_then(|p| p.workspaces.iter().find(|w| w.id == wid))
-            .and_then(|w| w.tabs.iter().find(|t| t.id == tid))
-            .is_some_and(|t| t.attention_since.is_some());
-        if !still_pending {
-            return;
-        }
-        self.go_to_tab(pid, wid, tid);
-    }
-
-    /// Make `(project, workspace, tab)` the active surface: expand its
-    /// ancestors so the Tab is reachable, switch the active locator, and
-    /// focus a Pane in the Tab. No-op if any leg is stale.
-    pub fn go_to_tab(&mut self, pid: ProjectId, wid: WorkspaceId, tid: TabId) {
-        let Some(project) = self.projects.iter_mut().find(|p| p.id == pid) else {
-            return;
-        };
-        project.expanded = true;
-        let Some(workspace) = project.workspaces.iter_mut().find(|w| w.id == wid) else {
-            return;
-        };
-        workspace.expanded = true;
-        let Some(tab) = workspace.tabs.iter_mut().find(|t| t.id == tid) else {
-            return;
-        };
-        workspace.active_tab = Some(tid);
-        // Focus the Tab's current focus, or any Pane if none set, so the
-        // surface is interactive the moment we land.
-        if tab.layout.focus.is_none() {
-            tab.layout.focus = tab.layout.panes.keys().next().copied();
-        }
-        self.active = Some((pid, wid, tid));
-        self.last_workspace = Some((pid, wid));
     }
 
     /// 1 Hz sweep: detect whether any live terminal has a known CLI
