@@ -25,16 +25,16 @@ pub struct PaneNotification {
     pub created_at: Instant,
 }
 
-/// Length of the initial "catch the eye" burst, in seconds. After this
-/// the attention indicator settles into a calm persistent dot that
-/// stays until the user actually opens the tab.
-pub const ATTENTION_BURST: f32 = 1.6;
+/// Period of one breathe-in/breathe-out attention pulse, in seconds. The
+/// glow swells and fades on this cycle and keeps repeating — it does not
+/// stop after a fixed burst. A longer period = a slower, gentler fade.
+pub const ATTENTION_PERIOD: f32 = 2.6;
 
 /// Visual state for a row carrying a pending notification. `glow` is the
-/// 0..1 burst intensity (three decaying `|sin|` humps over
-/// [`ATTENTION_BURST`], then 0); `dot` is whether to draw the persistent
-/// unread marker. Computed from the most-recent `attention_since` among
-/// the tabs aggregated into a row.
+/// 0..1 pulse intensity (a slow, continuous breathing cycle over
+/// [`ATTENTION_PERIOD`] that loops until the tab is opened); `dot` is
+/// whether to draw the persistent unread marker. Computed from the
+/// most-recent `attention_since` among the tabs aggregated into a row.
 #[derive(Clone, Copy, Default)]
 pub struct AttentionViz {
     pub glow: f32,
@@ -47,20 +47,20 @@ impl AttentionViz {
             None => Self::default(),
             Some(t) => {
                 let e = t.elapsed().as_secs_f32();
-                let glow = if e < ATTENTION_BURST {
-                    let phase = e / ATTENTION_BURST;
-                    (phase * 3.0 * std::f32::consts::PI).sin().abs() * (1.0 - phase)
-                } else {
-                    0.0
-                };
+                // Smooth 0→1→0 breathing via raised cosine, repeating every
+                // ATTENTION_PERIOD. Never settles to 0 — it keeps pulsing
+                // until the user opens the tab and clears `attention_since`.
+                let phase = (e / ATTENTION_PERIOD) * std::f32::consts::TAU;
+                let glow = (1.0 - phase.cos()) * 0.5;
                 Self { glow, dot: true }
             }
         }
     }
-    /// True while the burst animation is still running — the caller uses
-    /// this to keep requesting repaints so the glow animates.
+    /// True whenever a notification is pending — the caller uses this to
+    /// keep requesting repaints so the pulse keeps breathing until the
+    /// tab is opened (which clears `attention_since`).
     pub fn animating(since: Option<Instant>) -> bool {
-        since.is_some_and(|t| t.elapsed().as_secs_f32() < ATTENTION_BURST)
+        since.is_some()
     }
 }
 

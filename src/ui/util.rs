@@ -188,9 +188,10 @@ pub fn draw_row(ui: &mut Ui, cfg: RowConfig<'_>) -> RowResult {
             accent(),
         );
     }
-    // Attention burst: accent wash over the row scaled by the current
-    // glow intensity. Painted over hover/active so it reads as "look
-    // here" even on the active-coloured surface.
+    // Attention pulse: accent wash over the row scaled by the current
+    // glow intensity. A slow breathing cycle that loops until the tab is
+    // opened. Painted over hover/active so it reads as "look here" even
+    // on the active-coloured surface.
     if cfg.attention.glow > 0.01 {
         let a = accent();
         let wash = Color32::from_rgba_unmultiplied(
@@ -439,7 +440,7 @@ pub fn draw_row(ui: &mut Ui, cfg: RowConfig<'_>) -> RowResult {
         }
     }
 
-    // Persistent unread dot — stays after the burst glow fades, until
+    // Persistent unread dot — rides alongside the breathing glow, until
     // the user visits the Tab. Sits at the right edge, shifted left of
     // any trailing buttons. Hidden while the row is hovered so it never
     // fights the close / action buttons that appear on hover.
