@@ -818,6 +818,13 @@ impl Handler for Term {
             }
         }
 
+        // IRM (insert mode): shift the rest of the row right by the
+        // glyph width so this character inserts rather than overwrites
+        // the cell under the cursor. This is what makes nano's mid-line
+        // editing add characters instead of clobbering the next one.
+        if self.mode.contains(TermMode::INSERT) {
+            self.insert_blank(if is_wide { 2 } else { 1 });
+        }
         let row_idx = self.grid.cursor.row.min(self.grid.rows.len() - 1);
         let col_idx = self.grid.cursor.col.min(self.grid.columns - 1);
         if let Some(row) = self.grid.rows.get_mut(row_idx) {
@@ -1168,10 +1175,23 @@ impl Handler for Term {
         }
     }
 
-    fn set_mode(&mut self, _mode: vte::ansi::Mode) {
-        // Plain (non-private) modes are mostly insert / line-feed
-        // flavor toggles; left as a stub until we wire up the
-        // matching Handler trait methods.
+    fn set_mode(&mut self, mode: vte::ansi::Mode) {
+        // IRM (Insert/Replace Mode, ANSI mode 4). nano et al. enter
+        // this via terminfo `smir` to insert mid-line — printed
+        // characters shift the rest of the row right instead of
+        // overwriting. Honored in `input`. Other plain modes are
+        // still stubbed until something exercises them.
+        if let vte::ansi::Mode::Named(vte::ansi::NamedMode::Insert) = mode {
+            self.mode |= TermMode::INSERT;
+        }
+    }
+
+    fn unset_mode(&mut self, mode: vte::ansi::Mode) {
+        // `rmir` — leave insert mode; printed characters overwrite
+        // again. See `set_mode` for the IRM rationale.
+        if let vte::ansi::Mode::Named(vte::ansi::NamedMode::Insert) = mode {
+            self.mode -= TermMode::INSERT;
+        }
     }
 
     fn set_private_mode(&mut self, mode: vte::ansi::PrivateMode) {
@@ -1991,6 +2011,28 @@ mod tests {
             "render path lost chars. got: {:?}",
             reconstructed
         );
+    }
+
+    /// IRM (Insert/Replace Mode, ANSI mode 4). User-reported: editing
+    /// mid-line in nano overwrote the next character instead of
+    /// inserting. nano enters insert mode via terminfo `smir` (`\e[4h`)
+    /// and expects printed glyphs to push the rest of the row right.
+    /// We swallowed `\e[4h` and overwrote; now we shift on print.
+    #[test]
+    fn irm_insert_mode_shifts_row_right() {
+        let mut t = Term::new(3, 20);
+        let mut p = crate::Processor::new();
+        // Lay down "abcd", park the cursor on top of 'b' (col 1).
+        p.parse_bytes(&mut t, b"abcd\r\x1b[1C");
+        assert_eq!(t.grid.cursor.col, 1);
+        // Enter insert mode and type 'X' — it must insert, not clobber.
+        p.parse_bytes(&mut t, b"\x1b[4hX");
+        let row: String = t.grid.rows[0].cells.iter().take(5).map(|c| c.ch).collect();
+        assert_eq!(row, "aXbcd", "IRM print must shift the tail right");
+        // Leave insert mode; subsequent prints overwrite again.
+        p.parse_bytes(&mut t, b"\x1b[4lY");
+        let row: String = t.grid.rows[0].cells.iter().take(5).map(|c| c.ch).collect();
+        assert_eq!(row, "aXYcd", "after rmir, print must overwrite");
     }
 
     #[test]
