@@ -34,14 +34,18 @@ use ui::pane_view::PaneAction;
 fn main() -> eframe::Result {
     env_logger::init();
     startup::fix_path_for_gui_launch();
-    // GTK has to be initialised on the main thread BEFORE any
-    // gtk/gdk/webkit2gtk object is constructed. wry's Linux backend
-    // creates its GTK window in `build_as_child`, so this has to
-    // happen before the first Browser pane is built. `gtk::init()` is
-    // idempotent-safe but we still only want to pay it once. Failure
-    // is non-fatal — the rest of the app doesn't depend on GTK, we
-    // just lose the Browser pane backend until the user installs the
-    // missing deps (libgtk-3 / libwebkit2gtk-4.1).
+
+    // Many Windows environments have broken Vulkan drivers (e.g. from
+    // older Intel integrated graphics or OBS Studio capture hooks) which
+    // cause wgpu to crash with STATUS_ACCESS_VIOLATION deep in native code
+    // when it probes Vulkan adapters. Force DirectX 12/11 to avoid this.
+    #[cfg(target_os = "windows")]
+    if std::env::var("WGPU_BACKEND").is_err() {
+        unsafe {
+            std::env::set_var("WGPU_BACKEND", "dx12,dx11");
+        }
+    }
+
     #[cfg(target_os = "linux")]
     if let Err(e) = gtk::init() {
         eprintln!(
@@ -54,14 +58,13 @@ fn main() -> eframe::Result {
         .with_inner_size([1480.0, 920.0])
         .with_min_inner_size([800.0, 500.0])
         .with_title("Crane");
+    
     if let Some(icon) = startup::load_app_icon() {
         viewport = viewport.with_icon(icon);
     }
+    
     let options = eframe::NativeOptions {
         viewport,
-        // Persist the window size / position across launches. Backed by
-        // eframe's storage (ron file under the OS' app-data dir). Requires
-        // the `persistence` feature.
         persist_window: true,
         ..Default::default()
     };
@@ -70,13 +73,12 @@ fn main() -> eframe::Result {
         "Crane",
         options,
         Box::new(|cc| {
-            // macOS menu bar must be installed from the main thread
-            // after NSApp exists. eframe's creation_context callback
-            // fires right after window init, which is late enough.
             platform_menu::install();
             #[cfg(target_os = "macos")]
             mac_keys::install_cmd_v_monitor();
-            Ok(Box::new(CraneApp::new(cc)))
+            
+            let app = CraneApp::new(cc);
+            Ok(Box::new(app))
         }),
     )
 }

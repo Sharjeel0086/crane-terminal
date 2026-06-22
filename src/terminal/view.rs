@@ -1394,6 +1394,62 @@ pub fn render_terminal(
         }
     }
 
+    #[cfg(target_os = "windows")]
+    if input_enabled && !other_widget_focused {
+        let mut ctrl_v = false;
+        ui.input_mut(|i| {
+            ctrl_v = i.events.iter().any(|e| {
+                if let egui::Event::Key { key, pressed: true, modifiers, .. } = e {
+                    ((modifiers.ctrl || modifiers.command) && *key == egui::Key::V) || (modifiers.shift && *key == egui::Key::Insert)
+                } else {
+                    false
+                }
+            });
+            if ctrl_v {
+                i.events.retain(|e| !matches!(e, egui::Event::Text(_) | egui::Event::Paste(_)));
+            }
+        });
+
+        // HACK: On Windows, egui_winit intercepts Ctrl+V to read clipboard text.
+        // If it finds no text (e.g. image only), it logs an error and swallows the event,
+        // so egui never sees Event::Key(V) or Event::Paste.
+        // We use GetAsyncKeyState to manually detect Ctrl+V in this scenario.
+        if !ctrl_v {
+            unsafe {
+                let ctrl = winapi::um::winuser::GetAsyncKeyState(0x11) as u16 & 0x8000 != 0;
+                let v = winapi::um::winuser::GetAsyncKeyState(0x56) as u16 & 0x8000 != 0;
+                let shift = winapi::um::winuser::GetAsyncKeyState(0x10) as u16 & 0x8000 != 0;
+                let insert = winapi::um::winuser::GetAsyncKeyState(0x2D) as u16 & 0x8000 != 0;
+                
+                if (ctrl && v) || (shift && insert) {
+                    static mut LAST_PASTE: Option<std::time::Instant> = None;
+                    let now = std::time::Instant::now();
+                    if LAST_PASTE.map(|t| now.duration_since(t).as_millis() > 300).unwrap_or(true) {
+                        let fg = winapi::um::winuser::GetForegroundWindow();
+                        let mut pid: u32 = 0;
+                        winapi::um::winuser::GetWindowThreadProcessId(fg, &mut pid);
+                        if pid == std::process::id() {
+                            ctrl_v = true;
+                            LAST_PASTE = Some(now);
+                        }
+                    }
+                }
+            }
+        }
+        
+        if ctrl_v {
+            if let Some(path) = crate::views::file_view::get_clipboard_image() {
+                paste_text = Some(path.to_string_lossy().into_owned());
+            } else if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                if let Ok(text) = clipboard.get_text() {
+                    if !text.is_empty() {
+                        paste_text = Some(text);
+                    }
+                }
+            }
+        }
+    }
+
     // Plain Tab still goes through the normal event path (egui doesn't
     // eat plain Tab the way it eats Shift+Tab), handled in the main
     // key-event loop below via `named_key_bytes`.

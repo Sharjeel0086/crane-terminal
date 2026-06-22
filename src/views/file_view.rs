@@ -828,34 +828,54 @@ fn render_scoped(
         let gutter_w = gutter_char_w * digits as f32 + 16.0;
         // Image files: decode + upload a GPU texture once, then display.
         if is_image_path(&tab.path) {
-            if tab.image_texture.is_none()
-                && let Ok(bytes) = std::fs::read(&tab.path)
-                && let Ok(img) = image::load_from_memory(&bytes)
+            #[cfg(not(target_os = "windows"))]
             {
-                let rgba = img.to_rgba8();
-                let size = [rgba.width() as usize, rgba.height() as usize];
-                let color = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
-                tab.image_texture = Some(ui.ctx().load_texture(
-                    format!("crane_img:{}", tab.path),
-                    color,
-                    egui::TextureOptions::LINEAR,
-                ));
+                if tab.image_texture.is_none()
+                    && let Ok(bytes) = std::fs::read(&tab.path)
+                    && let Ok(img) = image::load_from_memory(&bytes)
+                {
+                    let rgba = img.to_rgba8();
+                    let size = [rgba.width() as usize, rgba.height() as usize];
+                    let color = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+                    tab.image_texture = Some(ui.ctx().load_texture(
+                        format!("crane_img:{}", tab.path),
+                        color,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+                ScrollArea::both()
+                    .id_salt(("image_scroll", active_idx))
+                    .auto_shrink([false; 2])
+                    .max_height(editor_h)
+                    .show(ui, |ui| {
+                        if let Some(tex) = &tab.image_texture {
+                            let size = tex.size_vec2();
+                            ui.add(egui::Image::from_texture(tex).fit_to_original_size(1.0).max_size(size));
+                        } else {
+                            ui.label(
+                                RichText::new("Couldn't decode image")
+                                    .color(theme::current().error.to_color32()),
+                            );
+                        }
+                    });
             }
-            ScrollArea::both()
-                .id_salt(("image_scroll", active_idx))
-                .auto_shrink([false; 2])
-                .max_height(editor_h)
-                .show(ui, |ui| {
-                    if let Some(tex) = &tab.image_texture {
-                        let size = tex.size_vec2();
-                        ui.add(egui::Image::from_texture(tex).fit_to_original_size(1.0).max_size(size));
-                    } else {
-                        ui.label(
-                            RichText::new("Couldn't decode image")
-                                .color(theme::current().error.to_color32()),
-                        );
-                    }
-                });
+            #[cfg(target_os = "windows")]
+            {
+                ScrollArea::both()
+                    .id_salt(("image_scroll", active_idx))
+                    .auto_shrink([false; 2])
+                    .max_height(editor_h)
+                    .show(ui, |ui| {
+                        let bytes = std::fs::read(&tab.path).unwrap_or_default();
+                        let dimensions = if let Ok(img) = image::load_from_memory(&bytes) {
+                            format!("{} x {}", img.width(), img.height())
+                        } else {
+                            "Unknown dimensions".to_string()
+                        };
+                        let text = format!("Read-only Image Preview\n\nPath: {}\nSize: {} bytes\nDimensions: {}", tab.path, bytes.len(), dimensions);
+                        ui.label(RichText::new(text).color(theme::current().text.to_color32()));
+                    });
+            }
             return false;
         }
 
@@ -931,7 +951,7 @@ fn render_scoped(
                             // Don't intercept; consuming the event here
                             // actually *prevents* the native redo from
                             // seeing it.
-                            let (tab_pressed, enter_pressed, shift_tab_pressed, cmd_slash_pressed, ctrl_g_pressed) = ui.input_mut(|i| {
+                            let (tab_pressed, enter_pressed, shift_tab_pressed, cmd_slash_pressed, ctrl_g_pressed, pasted_text, pasted_img) = ui.input_mut(|i| {
                                 let t = i.key_pressed(egui::Key::Tab)
                                     && !i.modifiers.shift
                                     && !i.modifiers.command
@@ -965,8 +985,45 @@ fn render_scoped(
                                 if cg {
                                     i.consume_key(egui::Modifiers::CTRL, egui::Key::G);
                                 }
-                                (t, e, st, cs, cg)
+                                
+                                let mut pt = None;
+                                let mut pi = None;
+                                let ctrl_v = (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V) || (i.modifiers.shift && i.key_pressed(egui::Key::Insert));
+                                #[cfg(target_os = "windows")]
+                                {
+                                    if ctrl_v {
+                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                            if let Ok(text) = clipboard.get_text() {
+                                                pt = Some(text);
+                                            }
+                                        }
+                                        if pt.is_none() {
+                                            pi = get_clipboard_image();
+                                        }
+                                        i.consume_key(egui::Modifiers::CTRL, egui::Key::V);
+                                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::V);
+                                        i.consume_key(egui::Modifiers::SHIFT, egui::Key::Insert);
+                                        i.events.retain(|e| !matches!(e, egui::Event::Text(_) | egui::Event::Paste(_)));
+                                    }
+                                }
+                                
+                                (t, e, st, cs, cg, pt, pi)
                             });
+
+                            if let Some(img_path) = pasted_img {
+                                dropped_external_files.push(img_path);
+                            }
+                            
+                            if let Some(text) = pasted_text {
+                                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), te_id) {
+                                    let cursor = state.cursor.char_range().map(|r| r.primary.index).unwrap_or(0);
+                                    let byte = crate::format::char_idx_to_byte(&tab.content, cursor);
+                                    tab.content.insert_str(byte, &text);
+                                    let new_cc = egui::text::CCursor::new(cursor + text.chars().count());
+                                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(new_cc)));
+                                    state.store(ui.ctx(), te_id);
+                                }
+                            }
 
                             if tab_pressed
                                 && let Some(mut state) =
@@ -2070,4 +2127,34 @@ fn close_rect_contains(response: &egui::Response, ui: &egui::Ui) -> bool {
         egui::vec2(close_size, close_size),
     );
     close_rect.contains(pos)
+}
+
+#[cfg(target_os = "windows")]
+pub fn get_clipboard_image() -> Option<std::path::PathBuf> {
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        match clipboard.get_image() {
+            Ok(img_data) => {
+                if let Some(img) = image::RgbaImage::from_raw(
+                    img_data.width as u32,
+                    img_data.height as u32,
+                    img_data.bytes.into_owned(),
+                ) {
+                    let mut tmp_dir = match crate::util::home_dir() {
+                        Some(h) => h.join(".crane").join("tmp_images"),
+                        None => std::env::temp_dir().join("crane").join("tmp_images"),
+                    };
+                    let _ = std::fs::create_dir_all(&tmp_dir);
+                    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                    let path = tmp_dir.join(format!("pasted_image_{}.png", timestamp));
+                    
+                    let dyn_img = image::DynamicImage::ImageRgba8(img);
+                    if dyn_img.save(&path).is_ok() {
+                        return Some(path);
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    None
 }

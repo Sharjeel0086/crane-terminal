@@ -1,0 +1,8 @@
+[package]
+name = "scratch_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arboard = "3.6.1"
+image = "0.25.10"

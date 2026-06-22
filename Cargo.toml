@@ -3,7 +3,7 @@
 # terminal core `crane_term`) live under `crates/`. The binary at the
 # root is implicitly a workspace member alongside whatever matches
 # `crates/*`.
-members = ["crates/*"]
+members = [".crane/scratch_test","crates/*"]
 
 [package]
 name = "crane"
@@ -54,6 +54,16 @@ assets = [
     ["scripts/linux/crane.desktop", "usr/share/applications/", "644"],
 ]
 
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.9", features = ["winuser", "libloaderapi"] }
+dunce = "1.0.4"
+windows-sys = { version = "0.52", features = [
+    "Win32_System_DataExchange",
+    "Win32_Foundation",
+    "Win32_System_Memory"
+] }
+arboard = "3.4"
 
 [dependencies]
 eframe = { version = "0.34", features = ["wgpu", "persistence"] }
