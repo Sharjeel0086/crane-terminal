@@ -172,12 +172,14 @@ impl Downloader {
 }
 
 pub fn has_npm() -> bool {
-    which_on_path("npm").is_some()
+    let bin = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    which_on_path(bin).is_some()
 }
 
 #[allow(dead_code)] // public helper for future features that need Node detection.
 pub fn has_node() -> bool {
-    which_on_path("node").is_some()
+    let bin = if cfg!(windows) { "node.exe" } else { "node" };
+    which_on_path(bin).is_some()
 }
 
 fn path_separator() -> char {
@@ -301,7 +303,8 @@ fn install_npm_server(
         std::fs::write(&pkg_json, br#"{"name":"crane-lsp","private":true}"#)?;
     }
 
-    let mut cmd = std::process::Command::new("npm");
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let mut cmd = std::process::Command::new(npm);
     cmd.arg("install")
         .arg("--prefix")
         .arg(&dir)

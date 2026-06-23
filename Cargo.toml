@@ -38,7 +38,7 @@ depends = ["libxkbcommon0", "libwayland-client0", "libgl1", "libx11-6"]
 # us explicit control over install paths, desktop entry, icon, and
 # runtime deps without depending on cargo-bundle's Linux codepath.
 [package.metadata.deb]
-maintainer = "rajpootathar <info@aalasolutions.com>"
+maintainer = "rajpootathar"
 copyright = "2026, rajpootathar"
 license-file = ["LICENSE", "0"]
 extended-description = """
@@ -61,7 +61,9 @@ dunce = "1.0.4"
 windows-sys = { version = "0.52", features = [
     "Win32_System_DataExchange",
     "Win32_Foundation",
-    "Win32_System_Memory"
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading"
 ] }
 arboard = "3.4"
 
@@ -127,6 +129,7 @@ ignore = "0.4"
 grep-searcher = "0.1"
 grep-regex = "0.1"
 grep-matcher = "0.1"
+backtrace = "0.3.76"
 
 [dev-dependencies]
 tempfile = "3"
@@ -191,3 +194,11 @@ opt-level = 3
 [profile.release]
 opt-level = 3
 strip = "symbols"
+
+[package.metadata.packager]
+product-name = "Crane"
+identifier = "sh.superset.crane"
+version = "0.4.59"
+authors = ["rajpootathar"]
+icons = ["crane.png"]
+out-dir = "target/release/installer"

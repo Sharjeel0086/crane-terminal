@@ -782,7 +782,7 @@ pub fn workspace_add(repo: &Path, path: &Path, branch: &str, create_new: bool) -
 /// track the file the user is actually looking at, not the outer
 /// Workspace root.
 pub fn find_git_root(start: &Path) -> Option<PathBuf> {
-    let canon = start.canonicalize().ok()?;
+    let canon = crate::platform::canonicalize_path(start).ok()?;
     crate::util::find_ancestor(&canon, |dir| dir.join(".git").exists())
 }
 
@@ -815,7 +815,7 @@ pub fn is_submodule(repo: &Path, path: &Path) -> bool {
             None => continue,
         };
         let abs = repo.join(sub_path);
-        if abs == path || abs.canonicalize().ok() == path.canonicalize().ok() {
+        if abs == path || crate::platform::canonicalize_path(&abs).ok() == crate::platform::canonicalize_path(path).ok() {
             return true;
         }
     }

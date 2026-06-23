@@ -40,8 +40,7 @@ pub fn read<R: Read>(r: &mut BufReader<R>) -> std::io::Result<Vec<u8>> {
 pub fn path_to_uri(path: &std::path::Path) -> String {
     // Minimal file:// URI encoding — percent-encodes spaces + a handful of
     // reserved characters. LSP servers accept this for typical repo paths.
-    let abs = path
-        .canonicalize()
+    let abs = crate::platform::canonicalize_path(path)
         .unwrap_or_else(|_| path.to_path_buf());
     let s = abs.to_string_lossy();
     let mut out = String::from("file://");

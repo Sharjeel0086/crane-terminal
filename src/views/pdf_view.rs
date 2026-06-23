@@ -151,26 +151,52 @@ fn get_pdfium() -> Result<&'static Pdfium, String> {
 
 fn candidate_pdfium_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    
+    let lib_name = if cfg!(target_os = "windows") {
+        "pdfium.dll"
+    } else if cfg!(target_os = "macos") {
+        "libpdfium.dylib"
+    } else {
+        "libpdfium.so"
+    };
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // Production bundle: Crane.app/Contents/MacOS/crane
-            //   → Crane.app/Contents/Frameworks/libpdfium.dylib
-            paths.push(dir.join("../Frameworks/libpdfium.dylib"));
+            #[cfg(target_os = "macos")]
+            paths.push(dir.join("../Frameworks").join(lib_name));
+            
+            #[cfg(not(target_os = "macos"))]
+            paths.push(dir.join(lib_name));
         }
     }
     // Dev: relative to CWD.
     paths.push(PathBuf::from(format!(
-        "vendor/pdfium/{}/libpdfium.dylib",
-        host_arch()
+        "vendor/pdfium/{}/{}",
+        host_arch_dir(),
+        lib_name
     )));
     paths
 }
 
-fn host_arch() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "arm64"
+fn host_arch_dir() -> &'static str {
+    if cfg!(target_os = "windows") {
+        if cfg!(target_arch = "aarch64") {
+            "win-arm64"
+        } else {
+            "win-x86_64"
+        }
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "mac-arm64"
+        } else {
+            "mac-x86_64"
+        }
     } else {
-        "x86_64"
+        if cfg!(target_arch = "aarch64") {
+            "linux-arm64"
+        } else {
+            "linux-x86_64"
+        }
     }
 }
 
@@ -638,16 +664,7 @@ fn evict_textures(state: &mut PdfTabState) {
 }
 
 fn open_externally(path: &std::path::Path) {
-    #[cfg(target_os = "macos")]
-    let cmd = "open";
-    #[cfg(target_os = "linux")]
-    let cmd = "xdg-open";
-    #[cfg(target_os = "windows")]
-    let cmd = "explorer";
-
-    if let Err(e) = std::process::Command::new(cmd).arg(path).spawn() {
-        log::warn!("open externally failed: {e}");
-    }
+    crate::platform::open_externally(path);
 }
 
 pub fn is_pdf_path(path: &str) -> bool {

@@ -34,7 +34,7 @@ fn use_crane_terminfo() -> bool {
             None => return false,
         };
         let terminfo_dir = home.join(".terminfo");
-        if !std::path::Path::new(&format!("{}/x", terminfo_dir.display())).exists() {
+        if !terminfo_dir.join("x").exists() {
             let _ = std::fs::create_dir_all(&terminfo_dir);
         }
         let probe = terminfo_dir.join("78").join("xterm-crane");
@@ -367,63 +367,16 @@ impl Terminal {
 
     /// True if the PTY's foreground process group is not the shell —
     /// i.e. something is actively running (vim, a build, etc.).
-    /// Unix-only; other platforms always return false.
-    #[cfg(unix)]
     pub fn has_foreground_process(&self) -> bool {
-        let Some(shell) = self.shell_pid else {
-            return false;
-        };
-        let Some(fd) = self.master.as_raw_fd() else {
-            return false;
-        };
-        let fg = unsafe { libc::tcgetpgrp(fd) };
-        if fg < 0 {
-            return false;
-        }
-        (fg as u32) != shell
-    }
-
-    #[cfg(not(unix))]
-    pub fn has_foreground_process(&self) -> bool {
-        false
+        crate::platform::has_foreground_process(self.shell_pid, self.master.as_ref())
     }
 
     /// Command name of the PTY's foreground process group (typically
     /// the binary the user is running — `claude`, `vim`, `cargo`, …),
     /// or `None` if the shell itself is in foreground or the lookup
-    /// fails. Shells out to `ps -o comm= -p <pid>` because reading
-    /// `/proc` isn't portable on macOS and `proc_pidpath` requires
-    /// linking against `libproc`. Cheap enough for a ~1 Hz poll.
-    #[cfg(unix)]
+    /// fails.
     pub fn foreground_process_name(&self) -> Option<String> {
-        let shell = self.shell_pid?;
-        let fd = self.master.as_raw_fd()?;
-        let fg = unsafe { libc::tcgetpgrp(fd) };
-        if fg < 0 || (fg as u32) == shell {
-            return None;
-        }
-        let out = std::process::Command::new("ps")
-            .args(["-o", "comm=", "-p"])
-            .arg(fg.to_string())
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let raw = String::from_utf8(out.stdout).ok()?;
-        let name = raw.trim();
-        if name.is_empty() {
-            return None;
-        }
-        // `ps` may return a full path on some configurations; keep
-        // the basename so the allowlist match is straightforward.
-        let basename = name.rsplit('/').next().unwrap_or(name);
-        Some(basename.to_string())
-    }
-
-    #[cfg(not(unix))]
-    pub fn foreground_process_name(&self) -> Option<String> {
-        None
+        crate::platform::foreground_process_name(self.shell_pid, self.master.as_ref())
     }
 
     /// True when the PTY's foreground process is a known CLI agent

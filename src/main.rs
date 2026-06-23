@@ -1,5 +1,6 @@
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod browser;
+pub mod platform;
 mod format;
 #[cfg(target_os = "macos")]
 mod mac_keys;
@@ -20,7 +21,7 @@ mod ui;
 mod update;
 mod util;
 mod views;
-
+mod crash_handler;
 use modals::{
     render_empty_state, render_help_modal, render_lsp_download_toast,
     render_lsp_install_prompt, render_missing_project_modal, render_new_workspace_modal,
@@ -32,27 +33,12 @@ use state::App;
 use ui::pane_view::PaneAction;
 
 fn main() -> eframe::Result {
+    
     env_logger::init();
     startup::fix_path_for_gui_launch();
 
-    // Many Windows environments have broken Vulkan drivers (e.g. from
-    // older Intel integrated graphics or OBS Studio capture hooks) which
-    // cause wgpu to crash with STATUS_ACCESS_VIOLATION deep in native code
-    // when it probes Vulkan adapters. Force DirectX 12/11 to avoid this.
-    #[cfg(target_os = "windows")]
-    if std::env::var("WGPU_BACKEND").is_err() {
-        unsafe {
-            std::env::set_var("WGPU_BACKEND", "dx12,dx11");
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    if let Err(e) = gtk::init() {
-        eprintln!(
-            "[crane] gtk::init failed: {e}. Browser pane will be unavailable. \
-             Install libgtk-3 + libwebkit2gtk-4.1 and relaunch."
-        );
-    }
+    crate::platform::init_app();
+    crash_handler::init();
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1480.0, 920.0])

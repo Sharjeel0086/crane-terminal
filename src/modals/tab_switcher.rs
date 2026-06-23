@@ -57,7 +57,7 @@ pub fn render(ctx: &egui::Context, app: &mut App) -> bool {
     #[cfg(target_os = "macos")]
     let cmd_held = crate::mac_keys::is_cmd_held();
     #[cfg(not(target_os = "macos"))]
-    let cmd_held = ctx.input(|i| i.modifiers.mac_cmd || i.modifiers.command);
+    let cmd_held = ctx.input(|i| i.modifiers.command);
     // Consume so Escape doesn't leak past the overlay into the
     // terminal (where \x1b would cancel whatever's running).
     let esc = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));

@@ -235,7 +235,7 @@ Expected: compiles with no errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset
+cd /Users/Sharjeel0086/ideaProjects/superset
 git add crane/crates/Cargo.toml crane/crates/crane-proto/
 git commit -m "feat(crane): initialize Rust workspace and crane-proto shared types"
 ```
@@ -360,7 +360,7 @@ Expected: all 6 crates compile (proto + 5 stubs).
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset
+cd /Users/Sharjeel0086/ideaProjects/superset
 git add crane/crates/crane-layout/ crane/crates/crane-text/ crane/crates/crane-terminal/ crane/crates/crane-theme/ crane/crates/crane-webview/
 git commit -m "feat(crane): add stub crates for layout, text, terminal, theme, webview"
 ```
@@ -553,7 +553,7 @@ Expected: compiles with no errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset
+cd /Users/Sharjeel0086/ideaProjects/superset
 git add crane/crates/crane-renderer/
 git commit -m "feat(crane): implement crane-renderer with wgpu clear pass"
 ```
@@ -729,7 +729,7 @@ Expected: compiles with no errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset
+cd /Users/Sharjeel0086/ideaProjects/superset
 git add crane/crates/crane-window/ crane/crates/Cargo.toml crane/crates/crane-renderer/Cargo.toml
 git commit -m "feat(crane): implement crane-window with winit event loop and resize handling"
 ```
@@ -830,7 +830,7 @@ Expected: compiles with no errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset
+cd /Users/Sharjeel0086/ideaProjects/superset
 git add crane/crates/crane-app/
 git commit -m "feat(crane): implement crane-app AppHandle with callback registration"
 ```
@@ -952,7 +952,7 @@ Expected output includes:
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset
+cd /Users/Sharjeel0086/ideaProjects/superset
 git add crane/crates/crane-ffi/
 git commit -m "feat(crane): implement crane-ffi with C-ABI exports for crane_init and crane_shutdown"
 ```
@@ -1030,7 +1030,7 @@ void crane_free_bytes(uint8_t *ptr, size_t len);
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset
+cd /Users/Sharjeel0086/ideaProjects/superset
 git add crane/include/
 git commit -m "feat(crane): add crane.h C header defining full FFI surface"
 ```
@@ -1047,7 +1047,7 @@ git commit -m "feat(crane): add crane.h C header defining full FFI surface"
 - [ ] **Step 1: Initialize Go module**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset/crane/go
+cd /Users/Sharjeel0086/ideaProjects/superset/crane/go
 go mod init crane
 ```
 
@@ -1188,7 +1188,7 @@ This is the standard CGo pattern for assigning Go-exported functions to C functi
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset
+cd /Users/Sharjeel0086/ideaProjects/superset
 git add crane/go/
 git commit -m "feat(crane): initialize Go module with CGo FFI bridge and callback exports"
 ```
@@ -1241,7 +1241,7 @@ func main() {
 - [ ] **Step 2: Commit**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset
+cd /Users/Sharjeel0086/ideaProjects/superset
 git add crane/go/cmd/
 git commit -m "feat(crane): add Go main entry point with runtime.LockOSThread for winit"
 ```
@@ -1351,7 +1351,7 @@ bin/
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset
+cd /Users/Sharjeel0086/ideaProjects/superset
 git add crane/Makefile crane/.gitignore
 git commit -m "feat(crane): add Makefile with build/run/clean targets and .gitignore"
 ```
@@ -1365,7 +1365,7 @@ git commit -m "feat(crane): add Makefile with build/run/clean targets and .gitig
 - [ ] **Step 1: Build Rust shared library**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset/crane
+cd /Users/Sharjeel0086/ideaProjects/superset/crane
 make build-rust-debug
 ```
 Expected: `crates/target/debug/libcrane_ffi.dylib` exists.
@@ -1380,7 +1380,7 @@ Expected output includes `_crane_init` and `_crane_shutdown`.
 - [ ] **Step 3: Build Go binary**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset/crane
+cd /Users/Sharjeel0086/ideaProjects/superset/crane
 make build-go
 ```
 Expected: `bin/crane` binary exists.
@@ -1388,7 +1388,7 @@ Expected: `bin/crane` binary exists.
 - [ ] **Step 4: Run Crane**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset/crane
+cd /Users/Sharjeel0086/ideaProjects/superset/crane
 make run
 ```
 Expected:
@@ -1413,7 +1413,7 @@ If the window doesn't appear, verify:
 - [ ] **Step 6: Run the full build via make**
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset/crane
+cd /Users/Sharjeel0086/ideaProjects/superset/crane
 make clean && make build && make run
 ```
 Expected: clean build from scratch, window opens, closes cleanly.
@@ -1423,7 +1423,7 @@ Expected: clean build from scratch, window opens, closes cleanly.
 If any changes were needed during verification:
 
 ```bash
-cd /Users/rajpootathar/ideaProjects/superset
+cd /Users/Sharjeel0086/ideaProjects/superset
 git add crane/
 git commit -m "fix(crane): resolve build issues from end-to-end verification"
 ```

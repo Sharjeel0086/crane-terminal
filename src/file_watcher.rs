@@ -112,7 +112,7 @@ impl FileWatcher {
     /// realpath-form notify reports (macOS reports /private/var/...
     /// for /var/... symlinks; identical issue on Linux with /tmp).
     pub fn watch_project(&self, project: ProjectId, root: PathBuf) -> std::io::Result<()> {
-        let canonical = match std::fs::canonicalize(&root) {
+        let canonical = match crate::platform::canonicalize_path(&root) {
             Ok(c) => c,
             Err(e) => {
                 // Falling back to the non-canonical path means macOS
@@ -190,7 +190,7 @@ impl Drop for FileWatcher {
 /// True if the path is git-internal churn or editor noise we never
 /// want to wake the App for.
 fn is_filtered(path: &Path) -> bool {
-    let s = path.to_string_lossy();
+    let s = path.to_string_lossy().replace('\\', "/");
     if s.contains("/.git/objects/")
         || s.contains("/.git/logs/")
         || s.contains("/.git/index.lock")

@@ -7,8 +7,9 @@
 # Cargo.toml — the API and ABI move in lockstep.
 #
 # Layout produced:
-#   vendor/pdfium/arm64/libpdfium.dylib
-#   vendor/pdfium/x86_64/libpdfium.dylib
+#   vendor/pdfium/mac-arm64/libpdfium.dylib
+#   vendor/pdfium/mac-x86_64/libpdfium.dylib
+#   vendor/pdfium/win-x86_64/pdfium.dll
 #
 # Idempotent: re-running with the same tag is a no-op.
 
@@ -22,11 +23,12 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR_DIR="$REPO_ROOT/vendor/pdfium"
 STAMP="$VENDOR_DIR/.pinned-tag"
 
-mkdir -p "$VENDOR_DIR/arm64" "$VENDOR_DIR/x86_64"
+mkdir -p "$VENDOR_DIR/mac-arm64" "$VENDOR_DIR/mac-x86_64" "$VENDOR_DIR/win-x86_64"
 
 if [[ -f "$STAMP" ]] && [[ "$(cat "$STAMP")" == "$PDFIUM_TAG" ]] \
-        && [[ -f "$VENDOR_DIR/arm64/libpdfium.dylib" ]] \
-        && [[ -f "$VENDOR_DIR/x86_64/libpdfium.dylib" ]]; then
+        && [[ -f "$VENDOR_DIR/mac-arm64/libpdfium.dylib" ]] \
+        && [[ -f "$VENDOR_DIR/mac-x86_64/libpdfium.dylib" ]] \
+        && [[ -f "$VENDOR_DIR/win-x86_64/pdfium.dll" ]]; then
     echo "pdfium $PDFIUM_TAG already vendored"
     exit 0
 fi
@@ -34,6 +36,7 @@ fi
 fetch_arch() {
     local arch_dir="$1"
     local asset="$2"
+    local lib_name="$3"
     local url="https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${asset}"
     local tmp
     tmp="$(mktemp -d)"
@@ -42,12 +45,18 @@ fetch_arch() {
     echo "fetching $asset ..."
     curl --fail --location --silent --show-error --output "$tmp/pdfium.tgz" "$url"
     tar -xzf "$tmp/pdfium.tgz" -C "$tmp"
-    cp "$tmp/lib/libpdfium.dylib" "$VENDOR_DIR/$arch_dir/libpdfium.dylib"
-    chmod 0644 "$VENDOR_DIR/$arch_dir/libpdfium.dylib"
+    
+    # The Windows archive puts it in x64/bin/pdfium.dll or just bin/pdfium.dll,
+    # let's just find it inside the extraction dir.
+    local src_lib
+    src_lib=$(find "$tmp" -name "$lib_name" | head -n 1)
+    cp "$src_lib" "$VENDOR_DIR/$arch_dir/$lib_name"
+    chmod 0644 "$VENDOR_DIR/$arch_dir/$lib_name"
 }
 
-fetch_arch arm64 pdfium-mac-arm64.tgz
-fetch_arch x86_64 pdfium-mac-x64.tgz
+fetch_arch mac-arm64 pdfium-mac-arm64.tgz libpdfium.dylib
+fetch_arch mac-x86_64 pdfium-mac-x64.tgz libpdfium.dylib
+fetch_arch win-x86_64 pdfium-win-x64.tgz pdfium.dll
 
 echo "$PDFIUM_TAG" > "$STAMP"
 echo "vendored: $VENDOR_DIR (tag $PDFIUM_TAG)"

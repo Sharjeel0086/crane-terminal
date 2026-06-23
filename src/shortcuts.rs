@@ -15,7 +15,7 @@ pub fn handle(
     // it opens regardless of any other modal state (and so it can be
     // re-triggered to refocus its query box if already open).
     let open_find = ctx.input_mut(|i| {
-        let pressed = (i.modifiers.command || i.modifiers.mac_cmd)
+        let pressed = i.modifiers.command
             && i.modifiers.shift
             && i.key_pressed(egui::Key::F);
         if pressed {
@@ -56,8 +56,8 @@ pub fn handle(
         || pending_close.is_some();
     if modal_open {
         let (cmd_w, esc) = ctx.input_mut(|i| {
-            let cmd_w = i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
-                || i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::W);
+            let cmd_w = i.consume_key(egui::Modifiers::COMMAND, egui::Key::W);
+
             let esc = i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
             (cmd_w, esc)
         });
@@ -243,12 +243,12 @@ pub fn handle(
 
     // Cmd+O: open external file via native file picker
     let open_file = ctx.input_mut(|i| {
-        let pressed = (i.modifiers.command || i.modifiers.mac_cmd)
+        let pressed = i.modifiers.command
             && i.key_pressed(egui::Key::O)
             && !i.modifiers.shift;
         if pressed {
             i.consume_key(egui::Modifiers::COMMAND, egui::Key::O);
-            i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::O);
+
         }
         pressed
     });
@@ -260,12 +260,12 @@ pub fn handle(
 
     // Cmd+Shift+O: open folder as project workspace
     let open_folder = ctx.input_mut(|i| {
-        let pressed = (i.modifiers.command || i.modifiers.mac_cmd)
+        let pressed = i.modifiers.command
             && i.modifiers.shift
             && i.key_pressed(egui::Key::O);
         if pressed {
             i.consume_key(egui::Modifiers::COMMAND, egui::Key::O);
-            i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::O);
+
         }
         pressed
     });
@@ -279,12 +279,12 @@ pub fn handle(
     // Matches IntelliJ's Git tool-window binding so users coming from
     // there have muscle memory.
     let toggle_log = ctx.input_mut(|i| {
-        let pressed = (i.modifiers.command || i.modifiers.mac_cmd)
+        let pressed = i.modifiers.command
             && i.key_pressed(egui::Key::Num9)
             && !i.modifiers.shift;
         if pressed {
             i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num9);
-            i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::Num9);
+
         }
         pressed
     });
@@ -304,13 +304,13 @@ pub fn handle(
         .unwrap_or(false);
     if git_log_has_focus {
         let pressed = ctx.input_mut(|i| {
-            let p = (i.modifiers.command || i.modifiers.mac_cmd)
+            let p = i.modifiers.command
                 && i.key_pressed(egui::Key::F)
                 && !i.modifiers.shift
                 && !i.modifiers.alt;
             if p && !already_focused {
                 i.consume_key(egui::Modifiers::COMMAND, egui::Key::F);
-                i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::F);
+
                 true
             } else {
                 false

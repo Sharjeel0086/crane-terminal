@@ -39,7 +39,7 @@ pub fn line_col_to_char(text: &str, line: u32, col: u32) -> usize {
     let mut cur_col = 0u32;
     let mut char_idx = 0usize;
     for ch in text.chars() {
-        if cur_line == line && cur_col == col {
+        if cur_line == line && cur_col >= col {
             return char_idx;
         }
         char_idx += 1;
@@ -47,7 +47,7 @@ pub fn line_col_to_char(text: &str, line: u32, col: u32) -> usize {
             cur_line += 1;
             cur_col = 0;
         } else {
-            cur_col += 1;
+            cur_col += ch.len_utf16() as u32;
         }
     }
     char_idx
@@ -68,7 +68,7 @@ pub fn char_idx_to_line_col(text: &str, char_idx: usize) -> (u32, u32) {
             line += 1;
             col = 0;
         } else {
-            col += 1;
+            col += ch.len_utf16() as u32;
         }
     }
     (line, col)
@@ -90,36 +90,12 @@ pub fn trim_trailing_whitespace(text: &str) -> String {
     out
 }
 
-/// Open the OS file-manager at a given path, with the file selected
-/// where the OS supports that verb.
 pub fn reveal_in_file_manager(path: &str) {
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
-    #[cfg(target_os = "linux")]
-    {
-        let parent = Path::new(path).parent().unwrap_or_else(|| Path::new("/"));
-        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
-    }
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("explorer")
-        .arg(format!("/select,{path}"))
-        .spawn();
+    crate::platform::reveal_in_file_manager(path);
 }
 
-/// Platform-appropriate label for the "reveal file" context-menu item.
 pub fn reveal_label() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        "Reveal in Finder"
-    }
-    #[cfg(target_os = "linux")]
-    {
-        "Reveal in Files"
-    }
-    #[cfg(target_os = "windows")]
-    {
-        "Reveal in Explorer"
-    }
+    crate::platform::reveal_label()
 }
 
 /// Return the line-comment prefix for the file at `path`, based on its

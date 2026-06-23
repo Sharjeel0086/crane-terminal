@@ -25,8 +25,8 @@ Grab the latest build for your platform from the [Releases](https://github.com/r
     Then open normally. (This happens on unsigned/unnotarized builds; a paid Apple Developer ID would fix it at the source.)
 - **Linux** (x86_64, Debian/Ubuntu) — `crane_<version>_amd64.deb`
   - `sudo dpkg -i crane_<version>_amd64.deb`
-- **Windows** (x86_64) — `Crane-<version>-windows-x86_64.zip`
-  - Extract, run `crane.exe`.
+- **Windows** (x86_64) — `crane_<version>_x64-setup.exe`
+  - Run the setup executable to cleanly install Crane and add it to your Start Menu.
 
 ---
 
@@ -140,7 +140,11 @@ sudo apt install \
 
 ### Windows
 
-Needs the MSVC toolchain (via Visual Studio Build Tools). No other prerequisites.
+Needs the MSVC toolchain (via Visual Studio Build Tools). No other prerequisites. To generate the NSIS setup installer, use the included PowerShell script:
+
+```powershell
+.\build_installer.ps1
+```
 
 ---
 
@@ -173,7 +177,7 @@ Pushing a tag `vX.Y.Z` triggers [`.github/workflows/release.yml`](.github/workfl
 
 - `Crane-<version>-universal.dmg`
 - `crane_<version>_amd64.deb`
-- `Crane-<version>-windows-x86_64.zip`
+- `crane_<version>_x64-setup.exe`
 
 …to the GitHub Release for that tag.
 
@@ -242,3 +246,6 @@ Covers:
 ## License
 
 [MIT](LICENSE) © rajpootathar
+
+---
+**Credits**: Modified by **Muhammad Sharjeel** (GitHub: [Sharjeel0086](https://github.com/Sharjeel0086), Repo: [https://github.com/Sharjeel0086/crane-terminal.git](https://github.com/Sharjeel0086/crane-terminal.git)). Muhammad Sharjeel updated the Windows OS environment to make Crane compatible on Windows and set up the Windows Crane `.exe` setup installer.

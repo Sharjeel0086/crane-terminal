@@ -1488,9 +1488,8 @@ impl App {
                             // via repo_path before comparing with the
                             // absolute path from the save callback.
                             let abs_right = dt.repo_path.as_ref().and_then(|repo| {
-                                std::path::Path::new(repo).join(&dt.right_path)
-                                    .canonicalize()
-                                    .ok()
+                                let p = std::path::Path::new(repo).join(&dt.right_path);
+                                crate::platform::canonicalize_path(&p).ok()
                                     .and_then(|p| p.to_str().map(|s| s.to_string()))
                             }).unwrap_or_else(|| dt.right_path.clone());
                             if abs_right != path {
@@ -1765,66 +1764,16 @@ impl App {
                 true
             }
             FileOp::Trash { path } => {
-                // macOS: `trash::os_limited` isn't compiled in, so
-                // there's no programmatic restore. Surface a hint
-                // pointing the user at Finder's "Put Back" so they
-                // know what to do.
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = path;
-                    self.git_error = Some(
-                        "Undo trash: open Finder → Trash → right-click → Put Back".into(),
-                    );
-                    false
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    use trash::os_limited;
-                    // Match by path — trash items have an
-                    // `original_parent` we can compare against.
-                    let parent = match path.parent() {
-                        Some(p) => p.to_path_buf(),
-                        None => {
-                            self.git_error = Some("Undo trash: no parent dir".into());
-                            return false;
+                match crate::platform::restore_trash_item(&path) {
+                    Ok(()) => {
+                        if let Some(parent) = path.parent() {
+                            self.expanded_dirs.insert(parent.to_path_buf());
                         }
-                    };
-                    let name = match path.file_name() {
-                        Some(n) => n.to_os_string(),
-                        None => {
-                            self.git_error = Some("Undo trash: no file name".into());
-                            return false;
-                        }
-                    };
-                    let items = match os_limited::list() {
-                        Ok(items) => items,
-                        Err(e) => {
-                            self.git_error = Some(format!("Undo trash: list: {e}"));
-                            return false;
-                        }
-                    };
-                    let target = items.into_iter().find(|it| {
-                        it.original_parent == parent && it.name == name
-                    });
-                    match target {
-                        Some(item) => match os_limited::restore_all([item]) {
-                            Ok(()) => {
-                                if let Some(parent) = path.parent() {
-                                    self.expanded_dirs.insert(parent.to_path_buf());
-                                }
-                                true
-                            }
-                            Err(e) => {
-                                self.git_error = Some(format!("Undo trash: {e}"));
-                                false
-                            }
-                        },
-                        None => {
-                            self.git_error = Some(
-                                "Undo trash: not found in trash (already restored or emptied?)".into(),
-                            );
-                            false
-                        }
+                        true
+                    }
+                    Err(e) => {
+                        self.git_error = Some(format!("Undo trash: {}", e));
+                        false
                     }
                 }
             }

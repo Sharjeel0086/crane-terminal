@@ -1,0 +1,64 @@
+name: Windows Build and Release
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  release:
+    types: [created]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: x86_64-pc-windows-msvc
+        
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+
+    - name: Build Debug
+      run: cargo build --verbose
+      
+    - name: Run Tests
+      run: cargo test --verbose
+
+    - name: Build Release
+      if: github.event_name == 'release'
+      run: cargo build --release --verbose
+      
+    - name: Install cargo-wix
+      if: github.event_name == 'release'
+      run: cargo install cargo-wix
+      
+    - name: Build MSI Installer
+      if: github.event_name == 'release'
+      run: cargo wix --no-build --nocapture -p crane
+      
+    - name: Upload Installer Artifact
+      if: github.event_name == 'release'
+      uses: actions/upload-artifact@v3
+      with:
+        name: Crane-Installer-Windows
+        path: target/wix/*.msi
+        
+    - name: Create Portable Zip
+      if: github.event_name == 'release'
+      run: Compress-Archive -Path target/release/crane.exe -DestinationPath target/release/Crane-portable-windows-x86_64.zip
+      
+    - name: Upload Portable Artifact
+      if: github.event_name == 'release'
+      uses: actions/upload-artifact@v3
+      with:
+        name: Crane-Portable-Windows
+        path: target/release/Crane-portable-windows-x86_64.zip

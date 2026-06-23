@@ -35,8 +35,8 @@ pub fn syntaxes() -> &'static SyntaxSet {
         // big step up from syntect's bundled set for modern dev work.
         let mut builder = two_face::syntax::extra_newlines().into_builder();
         // User-dropped packages still fold in on top.
-        if let Ok(home) = std::env::var("HOME") {
-            let dir = std::path::PathBuf::from(format!("{home}/.crane/syntaxes"));
+        if let Some(home) = crate::util::home_dir() {
+            let dir = home.join(".crane").join("syntaxes");
             if dir.is_dir() {
                 let _ = builder.add_from_folder(&dir, true);
             }
@@ -333,12 +333,12 @@ fn render_scoped(
 
     // Save shortcut (blocked for read-only files)
     let save_pressed = active_is_file && !active_read_only && ui.input(|i| {
-        (i.modifiers.command || i.modifiers.mac_cmd) && i.key_pressed(egui::Key::S)
+        i.modifiers.command && i.key_pressed(egui::Key::S)
     });
     // Cmd+F opens the find bar (or replaces the query with the current
     // selection). Esc closes it — Cmd+F never closes.
     let find_toggle = active_is_file && !active_read_only && ui.input(|i| {
-        (i.modifiers.command || i.modifiers.mac_cmd) && i.key_pressed(egui::Key::F)
+        i.modifiers.command && i.key_pressed(egui::Key::F)
     });
     if find_toggle {
         let t = pane.tabs[active_idx].as_file_mut().unwrap();
@@ -361,10 +361,10 @@ fn render_scoped(
     }
     // Cmd+H toggles the replace row inside the find bar.
     let replace_toggle = active_is_file && ui.input_mut(|i| {
-        let pressed = (i.modifiers.command || i.modifiers.mac_cmd) && i.key_pressed(egui::Key::H);
+        let pressed = i.modifiers.command && i.key_pressed(egui::Key::H);
         if pressed {
             i.consume_key(egui::Modifiers::COMMAND, egui::Key::H);
-            i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::H);
+
         }
         pressed
     });
@@ -828,54 +828,7 @@ fn render_scoped(
         let gutter_w = gutter_char_w * digits as f32 + 16.0;
         // Image files: decode + upload a GPU texture once, then display.
         if is_image_path(&tab.path) {
-            #[cfg(not(target_os = "windows"))]
-            {
-                if tab.image_texture.is_none()
-                    && let Ok(bytes) = std::fs::read(&tab.path)
-                    && let Ok(img) = image::load_from_memory(&bytes)
-                {
-                    let rgba = img.to_rgba8();
-                    let size = [rgba.width() as usize, rgba.height() as usize];
-                    let color = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
-                    tab.image_texture = Some(ui.ctx().load_texture(
-                        format!("crane_img:{}", tab.path),
-                        color,
-                        egui::TextureOptions::LINEAR,
-                    ));
-                }
-                ScrollArea::both()
-                    .id_salt(("image_scroll", active_idx))
-                    .auto_shrink([false; 2])
-                    .max_height(editor_h)
-                    .show(ui, |ui| {
-                        if let Some(tex) = &tab.image_texture {
-                            let size = tex.size_vec2();
-                            ui.add(egui::Image::from_texture(tex).fit_to_original_size(1.0).max_size(size));
-                        } else {
-                            ui.label(
-                                RichText::new("Couldn't decode image")
-                                    .color(theme::current().error.to_color32()),
-                            );
-                        }
-                    });
-            }
-            #[cfg(target_os = "windows")]
-            {
-                ScrollArea::both()
-                    .id_salt(("image_scroll", active_idx))
-                    .auto_shrink([false; 2])
-                    .max_height(editor_h)
-                    .show(ui, |ui| {
-                        let bytes = std::fs::read(&tab.path).unwrap_or_default();
-                        let dimensions = if let Ok(img) = image::load_from_memory(&bytes) {
-                            format!("{} x {}", img.width(), img.height())
-                        } else {
-                            "Unknown dimensions".to_string()
-                        };
-                        let text = format!("Read-only Image Preview\n\nPath: {}\nSize: {} bytes\nDimensions: {}", tab.path, bytes.len(), dimensions);
-                        ui.label(RichText::new(text).color(theme::current().text.to_color32()));
-                    });
-            }
+            crate::platform::render_image_preview(ui, active_idx, editor_h, &tab.path, &mut tab.image_texture);
             return false;
         }
 
@@ -954,33 +907,33 @@ fn render_scoped(
                             let (tab_pressed, enter_pressed, shift_tab_pressed, cmd_slash_pressed, ctrl_g_pressed, pasted_text, pasted_img) = ui.input_mut(|i| {
                                 let t = i.key_pressed(egui::Key::Tab)
                                     && !i.modifiers.shift
-                                    && !i.modifiers.command
-                                    && !i.modifiers.mac_cmd;
+                                    && !i.modifiers.command;
+
                                 if t {
                                     i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
                                 }
                                 let e = i.key_pressed(egui::Key::Enter)
                                     && !i.modifiers.shift
-                                    && !i.modifiers.command
-                                    && !i.modifiers.mac_cmd;
+                                    && !i.modifiers.command;
+
                                 if e {
                                     i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
                                 }
                                 let st = i.key_pressed(egui::Key::Tab)
                                     && i.modifiers.shift
-                                    && !i.modifiers.command
-                                    && !i.modifiers.mac_cmd;
+                                    && !i.modifiers.command;
+
                                 if st {
                                     i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
                                 }
-                                let cs = (i.modifiers.command || i.modifiers.mac_cmd)
+                                let cs = i.modifiers.command
                                     && i.key_pressed(egui::Key::Slash);
                                 if cs {
                                     i.consume_key(egui::Modifiers::COMMAND, egui::Key::Slash);
-                                    i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::Slash);
+
                                 }
                                 let cg = i.modifiers.ctrl && !i.modifiers.shift
-                                    && !i.modifiers.command && !i.modifiers.mac_cmd
+                                    && !i.modifiers.command 
                                     && i.key_pressed(egui::Key::G);
                                 if cg {
                                     i.consume_key(egui::Modifiers::CTRL, egui::Key::G);
@@ -989,23 +942,7 @@ fn render_scoped(
                                 let mut pt = None;
                                 let mut pi = None;
                                 let ctrl_v = (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V) || (i.modifiers.shift && i.key_pressed(egui::Key::Insert));
-                                #[cfg(target_os = "windows")]
-                                {
-                                    if ctrl_v {
-                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                            if let Ok(text) = clipboard.get_text() {
-                                                pt = Some(text);
-                                            }
-                                        }
-                                        if pt.is_none() {
-                                            pi = get_clipboard_image();
-                                        }
-                                        i.consume_key(egui::Modifiers::CTRL, egui::Key::V);
-                                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::V);
-                                        i.consume_key(egui::Modifiers::SHIFT, egui::Key::Insert);
-                                        i.events.retain(|e| !matches!(e, egui::Event::Text(_) | egui::Event::Paste(_)));
-                                    }
-                                }
+                                crate::platform::handle_paste_event(i, ctrl_v, &mut pt, &mut pi);
                                 
                                 (t, e, st, cs, cg, pt, pi)
                             });
@@ -1209,19 +1146,19 @@ fn render_scoped(
                             {
                                 let alt_up = ui.input_mut(|i| {
                                     let pressed = i.modifiers.alt && i.key_pressed(egui::Key::ArrowUp)
-                                        && !i.modifiers.shift && !i.modifiers.command && !i.modifiers.mac_cmd;
+                                        && !i.modifiers.shift && !i.modifiers.command ;
                                     if pressed { i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowUp); }
                                     pressed
                                 });
                                 let alt_down = ui.input_mut(|i| {
                                     let pressed = i.modifiers.alt && i.key_pressed(egui::Key::ArrowDown)
-                                        && !i.modifiers.shift && !i.modifiers.command && !i.modifiers.mac_cmd;
+                                        && !i.modifiers.shift && !i.modifiers.command ;
                                     if pressed { i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowDown); }
                                     pressed
                                 });
                                 let alt_shift_down = ui.input_mut(|i| {
                                     let pressed = i.modifiers.alt && i.modifiers.shift && i.key_pressed(egui::Key::ArrowDown)
-                                        && !i.modifiers.command && !i.modifiers.mac_cmd;
+                                        && !i.modifiers.command ;
                                     if pressed { i.consume_key(egui::Modifiers::ALT | egui::Modifiers::SHIFT, egui::Key::ArrowDown); }
                                     pressed
                                 });
@@ -2129,32 +2066,3 @@ fn close_rect_contains(response: &egui::Response, ui: &egui::Ui) -> bool {
     close_rect.contains(pos)
 }
 
-#[cfg(target_os = "windows")]
-pub fn get_clipboard_image() -> Option<std::path::PathBuf> {
-    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-        match clipboard.get_image() {
-            Ok(img_data) => {
-                if let Some(img) = image::RgbaImage::from_raw(
-                    img_data.width as u32,
-                    img_data.height as u32,
-                    img_data.bytes.into_owned(),
-                ) {
-                    let mut tmp_dir = match crate::util::home_dir() {
-                        Some(h) => h.join(".crane").join("tmp_images"),
-                        None => std::env::temp_dir().join("crane").join("tmp_images"),
-                    };
-                    let _ = std::fs::create_dir_all(&tmp_dir);
-                    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-                    let path = tmp_dir.join(format!("pasted_image_{}.png", timestamp));
-                    
-                    let dyn_img = image::DynamicImage::ImageRgba8(img);
-                    if dyn_img.save(&path).is_ok() {
-                        return Some(path);
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-    }
-    None
-}

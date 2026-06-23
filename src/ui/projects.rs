@@ -81,24 +81,8 @@ fn reveal_in_file_manager(path: &std::path::Path) {
     // receives a concrete on-disk path. Worktrees can live under
     // symlinked paths (e.g. `/var` → `/private/var` on macOS) and a
     // stale `~` prefix would also silently drop the command here.
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    #[cfg(target_os = "macos")]
-    {
-        // `open <dir>` opens the folder in a new Finder window —
-        // matches what users expect when they say "reveal". We
-        // prefer that over `open -R <dir>` (which highlights the
-        // folder in its parent) since worktrees' parents are usually
-        // `~/.crane-worktrees/<project>` which isn't meaningful UI.
-        let _ = std::process::Command::new("open").arg(&resolved).spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(&resolved).spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("explorer").arg(&resolved).spawn();
-    }
+    let resolved = crate::platform::canonicalize_path(path).unwrap_or_else(|_| path.to_path_buf());
+    crate::platform::open_externally(&resolved);
 }
 
 /// Most-recent pending-notification timestamp among a Workspace's Tabs.
@@ -1039,7 +1023,7 @@ fn render_tree(ui: &mut egui::Ui, app: &mut App, ctx: &egui::Context) {
                                 // keyboard.
                                 let rename_chord = ctx.input(|i| {
                                     i.key_pressed(egui::Key::F2)
-                                        || ((i.modifiers.mac_cmd || i.modifiers.command)
+                                        || ((i.modifiers.command)
                                             && !i.modifiers.shift
                                             && i.key_pressed(egui::Key::R))
                                 });

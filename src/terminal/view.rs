@@ -227,18 +227,7 @@ fn scan_paths(row: &str, cwd: &std::path::Path) -> Vec<PathHit> {
 /// `reveal_in_file_manager` pattern in `ui/projects.rs` — spawn so we
 /// don't block the UI thread, ignore the child handle (fire-and-forget).
 fn open_in_default_app(path: &std::path::Path) {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(path).spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("explorer").arg(path).spawn();
-    }
+    crate::platform::open_externally(path);
 }
 
 fn term_bg() -> Color32 {
@@ -1355,99 +1344,22 @@ pub fn render_terminal(
 
     let mut copy_text: Option<String> = None;
     let mut paste_text: Option<String> = None;
+    let mut paste_img: Option<std::path::PathBuf> = None;
     let mut clear_requested = false;
     // When a modal overlay is open the parent ui is disabled — skip
     // all keyboard/paste input routing so key events don't leak into
     // the PTY through the backdrop.
     let input_enabled = ui.is_enabled();
-    // Image paste: on macOS an NSEvent local monitor (mac_keys.rs)
-    // catches Cmd+V before winit sees it, reads NSPasteboard for
-    // image data, writes it to a temp PNG, and enqueues the path.
-    // Drain here so it flows into the active terminal as a normal
-    // bracketed paste. egui-winit's Event::Paste path can't be used:
-    // it calls arboard.get() for text only and returns early on
-    // image clipboards without pushing any event.
-    #[cfg(target_os = "macos")]
-    if input_enabled && !other_widget_focused {
-        let mut paths = crate::mac_keys::drain_pending_image_paths();
-        if let Some(p) = paths.pop() {
-            paste_text = Some(p);
-        }
-    }
-    // Tell the NSEvent monitor that the terminal has focus so it will
-    // swallow Shift+Tab (CSI Z). egui's focus navigator eats the key
-    // before our handler runs in-frame, so we intercept at the OS
-    // level. See `mac_keys.rs::set_terminal_focused`.
-    #[cfg(target_os = "macos")]
-    crate::mac_keys::set_terminal_focused(input_enabled && !other_widget_focused);
 
-    // Drain and write any Shift+Tab presses the NSEvent monitor caught.
-    #[cfg(target_os = "macos")]
     if input_enabled && !other_widget_focused {
-        let count = crate::mac_keys::drain_pending_shift_tab();
-        for _ in 0..count {
-            terminal.write_input(b"\x1b[Z");
-        }
-        let tab_count = crate::mac_keys::drain_pending_tab();
-        for _ in 0..tab_count {
-            terminal.write_input(b"\t");
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    if input_enabled && !other_widget_focused {
-        let mut ctrl_v = false;
         ui.input_mut(|i| {
-            ctrl_v = i.events.iter().any(|e| {
-                if let egui::Event::Key { key, pressed: true, modifiers, .. } = e {
-                    ((modifiers.ctrl || modifiers.command) && *key == egui::Key::V) || (modifiers.shift && *key == egui::Key::Insert)
-                } else {
-                    false
-                }
-            });
-            if ctrl_v {
-                i.events.retain(|e| !matches!(e, egui::Event::Text(_) | egui::Event::Paste(_)));
-            }
+            let ctrl_v = i.modifiers.command && i.key_pressed(egui::Key::V);
+            crate::platform::handle_paste_event(i, ctrl_v, &mut paste_text, &mut paste_img);
         });
+    }
 
-        // HACK: On Windows, egui_winit intercepts Ctrl+V to read clipboard text.
-        // If it finds no text (e.g. image only), it logs an error and swallows the event,
-        // so egui never sees Event::Key(V) or Event::Paste.
-        // We use GetAsyncKeyState to manually detect Ctrl+V in this scenario.
-        if !ctrl_v {
-            unsafe {
-                let ctrl = winapi::um::winuser::GetAsyncKeyState(0x11) as u16 & 0x8000 != 0;
-                let v = winapi::um::winuser::GetAsyncKeyState(0x56) as u16 & 0x8000 != 0;
-                let shift = winapi::um::winuser::GetAsyncKeyState(0x10) as u16 & 0x8000 != 0;
-                let insert = winapi::um::winuser::GetAsyncKeyState(0x2D) as u16 & 0x8000 != 0;
-                
-                if (ctrl && v) || (shift && insert) {
-                    static mut LAST_PASTE: Option<std::time::Instant> = None;
-                    let now = std::time::Instant::now();
-                    if LAST_PASTE.map(|t| now.duration_since(t).as_millis() > 300).unwrap_or(true) {
-                        let fg = winapi::um::winuser::GetForegroundWindow();
-                        let mut pid: u32 = 0;
-                        winapi::um::winuser::GetWindowThreadProcessId(fg, &mut pid);
-                        if pid == std::process::id() {
-                            ctrl_v = true;
-                            LAST_PASTE = Some(now);
-                        }
-                    }
-                }
-            }
-        }
-        
-        if ctrl_v {
-            if let Some(path) = crate::views::file_view::get_clipboard_image() {
-                paste_text = Some(path.to_string_lossy().into_owned());
-            } else if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                if let Ok(text) = clipboard.get_text() {
-                    if !text.is_empty() {
-                        paste_text = Some(text);
-                    }
-                }
-            }
-        }
+    if let Some(path) = paste_img {
+        paste_text = Some(format!("'{}'", path.display()));
     }
 
     // Plain Tab still goes through the normal event path (egui doesn't
@@ -1484,7 +1396,7 @@ pub fn render_terminal(
                     pressed: true,
                     modifiers,
                     ..
-                } if modifiers.mac_cmd || modifiers.command => {
+                } if modifiers.command => {
                     if other_widget_focused {
                         continue;
                     }
@@ -1502,7 +1414,7 @@ pub fn render_terminal(
                     pressed: true,
                     modifiers,
                     ..
-                } if modifiers.mac_cmd || modifiers.command => {
+                } if modifiers.command => {
                     if other_widget_focused {
                         continue;
                     }
@@ -1543,7 +1455,7 @@ pub fn render_terminal(
                             terminal.write_input(&[letter - b'a' + 1]);
                             continue;
                         }
-                    if modifiers.mac_cmd || modifiers.command {
+                    if modifiers.command {
                         // Image paste for Cmd+V is handled by
                         // mac_keys.rs's NSEvent monitor, whose queue
                         // is drained above. All other Cmd+key combos
@@ -1605,7 +1517,11 @@ pub fn render_terminal(
     if let Some(t) = copy_text {
         ui.ctx().copy_text(t);
     }
-    if let Some(t) = paste_text {
+    if let Some(mut t) = paste_text {
+        // Standard terminal behavior: normalize CRLF to CR so shells don't read
+        // double-newlines on paste (which can cause commands to execute prematurely).
+        t = t.replace("\r\n", "\r");
+        
         // Only wrap in bracketed-paste markers when the running
         // shell / TUI has actually asked for it (DECSET 2004 —
         // crane_term tracks this as TermMode::BRACKETED_PASTE). If

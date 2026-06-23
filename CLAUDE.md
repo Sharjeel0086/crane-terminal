@@ -64,6 +64,7 @@ cargo build           # debug build (opt-level=1 for first-party, 3 for deps —
 cargo run             # run debug build
 cargo build --release # release build for actual use
 make test             # cargo test --bin crane
+.\build_installer.ps1 # (Windows only) Builds the NSIS Setup Executable
 ```
 
 Keep `opt-level = 1` for `[profile.dev]` and `opt-level = 3` for `[profile.dev.package."*"]` — without these the GUI is noticeably laggy.

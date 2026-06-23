@@ -434,7 +434,11 @@ impl BrowserHost {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = focused;
+            if let Some(key) = focused {
+                if let Some(slot) = self.slots.get(&key) {
+                    let _ = slot.webview.focus();
+                }
+            }
         }
     }
 }

@@ -34,13 +34,16 @@ pub fn paint(
         let Some(base) = line_char_starts.get(line as usize).copied() else {
             return egui::text::CCursor::new(total_chars);
         };
-        let next = line_char_starts
-            .get(line as usize + 1)
-            .copied()
-            .unwrap_or(total_chars);
-        let line_len = next.saturating_sub(base).saturating_sub(1);
-        let col_clamped = (col as usize).min(line_len);
-        egui::text::CCursor::new(base + col_clamped)
+        let mut char_offset = 0;
+        let mut utf16_col = 0;
+        for ch in text.chars().skip(base) {
+            if ch == '\n' || utf16_col >= col {
+                break;
+            }
+            utf16_col += ch.len_utf16() as u32;
+            char_offset += 1;
+        }
+        egui::text::CCursor::new(base + char_offset)
     };
 
     let painter = ui.painter();

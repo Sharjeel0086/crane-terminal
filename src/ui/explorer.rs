@@ -74,17 +74,7 @@ fn toolbar_button(
 }
 
 fn reveal_in_file_manager(path: &std::path::Path) {
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
-    #[cfg(target_os = "linux")]
-    {
-        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("/"));
-        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
-    }
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("explorer")
-        .arg(format!("/select,{}", path.display()))
-        .spawn();
+    crate::platform::reveal_in_file_manager(&path.to_string_lossy());
 }
 
 pub fn render(ui: &mut egui::Ui, app: &mut App) {
@@ -415,7 +405,7 @@ fn render_changes(ui: &mut egui::Ui, app: &mut App) {
     if text_resp.has_focus() {
         let submit = footer_ui.input(|i| {
             i.key_pressed(egui::Key::Enter)
-                && (i.modifiers.command || i.modifiers.mac_cmd)
+                && i.modifiers.command
         });
         if submit && can_commit && !any_op_running {
             keyboard_commit = true;
@@ -1630,12 +1620,12 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     // Compare canonicalized paths so symlinked aliases are caught
     // too. If canonicalize fails (e.g. dst doesn't exist yet), fall
     // back to a textual prefix check on the absolute paths.
-    let src_canon = std::fs::canonicalize(src)?;
-    let dst_abs = match std::fs::canonicalize(dst) {
+    let src_canon = crate::platform::canonicalize_path(src)?;
+    let dst_abs = match crate::platform::canonicalize_path(dst) {
         Ok(p) => p,
         Err(_) => dst
             .parent()
-            .and_then(|p| std::fs::canonicalize(p).ok())
+            .and_then(|p| crate::platform::canonicalize_path(&p).ok())
             .map(|p| p.join(dst.file_name().unwrap_or_default()))
             .unwrap_or_else(|| dst.to_path_buf()),
     };
@@ -1674,10 +1664,10 @@ fn copy_dir_recursive_inner(src: &std::path::Path, dst: &std::path::Path, depth:
 /// it. Used by every copy / move entry point to refuse the operation
 /// before any bytes are written.
 fn dst_inside_src(src: &std::path::Path, dst_dir: &std::path::Path) -> bool {
-    let Ok(src_c) = std::fs::canonicalize(src) else {
+    let Ok(src_c) = crate::platform::canonicalize_path(src) else {
         return false;
     };
-    let dst_c = std::fs::canonicalize(dst_dir).unwrap_or_else(|_| dst_dir.to_path_buf());
+    let dst_c = crate::platform::canonicalize_path(dst_dir).unwrap_or_else(|_| dst_dir.to_path_buf());
     dst_c == src_c || dst_c.starts_with(&src_c)
 }
 
